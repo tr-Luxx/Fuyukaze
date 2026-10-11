@@ -31,6 +31,8 @@ Or open `Fuyukaze.uproject` in the editor and press Play.
 | Spend resolve to heal | F | D-pad down |
 | Guiding wind (points to the objective) | G | RB |
 | Cinema mode (black and white) | K | View |
+| Ultimate, Winter Wind (needs a full resolve meter) | R | LT |
+| Challenge a player to a duel, accept, or yield | V | RT |
 | Pause (then Enter / Y quits to desktop) | Esc | Menu |
 | Show or hide controls | F1 | |
 
@@ -46,6 +48,9 @@ Or open `Fuyukaze.uproject` in the editor and press Play.
   roughly doubles posture damage.
 - **Resolve.** Earned from parries and kills, spent to heal. Freeing a camp restores health and
   resolve and becomes your respawn point.
+- **Winter Wind.** With all three resolve filled, the ultimate spends the lot: the samurai gathers, blinks through up to
+  six enemies within 15 m leaving trails of light, holds, and then cuts them all at once for heavy damage. She cannot be
+  hurt while it plays, and its kills do not earn resolve back.
 - **Hit chain.** Landing hits within three seconds of each other builds a chain. The hit sound
   climbs in pitch with it, every fifth hit pays out a little resolve, and taking a hit resets it.
 
@@ -86,6 +91,22 @@ Two machine-specific notes:
   inside the editor.
 - If another Unreal Editor is open with Live Coding on, add `-IgnoreLiveCoding` to `Build.ps1`.
 
+## Multiplayer and duels
+
+Up to a few players can share the island over a local network.
+
+- **Host:** double-click `Host Game.bat`. It prints this PC's IP addresses, then starts the game.
+- **Join:** double-click `Join Game.bat` and type the host's IP address (or press Enter to join a host on the same PC).
+- **Duels:** stand near another player and press **V** to challenge them. They press **V** to accept. Players can only
+  hurt each other during a duel. The first to run out of health yields and is left standing; **V** during a duel gives up.
+
+The host decides health, guards, hits and duels; enemies think on the host only. Hit-stop and slow motion are
+single-player only, because slowing one machine's clock would put it out of step with the others.
+
+Every player needs their own copy of the project built against Unreal Engine 5.8 (there is no packaged build yet).
+Playing over the internet needs UDP port 7777 forwarded to the host, or a virtual LAN.
+
+`Tools\NetTest.ps1` runs a host and a joining player headless with bots on both sides and prints what happened.
 ## Scanned assets
 
 The realistic trees, grass, ground and lanterns come from Fab and are not in this repository (they are

@@ -58,6 +58,9 @@ AFuyuEnemy::AFuyuEnemy()
 	GlintLight->SetAttenuationRadius(700.0f);
 	GlintLight->SetIntensity(0.0f);
 
+	// joined players are told about enemies out to 600 m, well beyond the default, so camps do not pop in at close range
+	SetNetCullDistanceSquared(FMath::Square(60000.0f));
+
 	// rotation is driven by the state machine so enemies can keep their eyes on the player while circling
 	GetCharacterMovement()->bUseControllerDesiredRotation = false;
 	GetCharacterMovement()->bOrientRotationToMovement = false;
@@ -284,8 +287,25 @@ void AFuyuEnemy::MoveTowards(const FVector& Target, float Speed)
 	AddMovementInput(SteerDirection.GetSafeNormal2D(), FMath::Min(SteerDirection.Size2D() + 0.25f, 1.0f));
 }
 
+void AFuyuEnemy::Freeze(float Seconds)
+{
+	// the enemy's own clock all but stops, which holds its animation and, on the host, its thinking too
+	CustomTimeDilation = 0.03f;
+	HitStopTimeLeft = Seconds;
+	ReleaseAttackToken();
+}
+
 void AFuyuEnemy::Impact(float FreezeSeconds)
 {
+	Cue(FreezeSeconds > 0.1f ? 5 : 4);
+
+	// the freeze is solo only; in a shared game it would put the enemy out of step with the host
+	if (GetNetMode() != NM_Standalone)
+	{
+		FlashTimeLeft = 0.14f;
+		return;
+	}
+
 	CustomTimeDilation = 0.04f;
 	HitStopTimeLeft = FreezeSeconds;
 	FlashTimeLeft = 0.14f;
@@ -320,6 +340,14 @@ void AFuyuEnemy::Tick(float DeltaSeconds)
 		}
 	}
 
+	// only the host runs the state machine
+	if (!HasAuthority())
+	{
+		ClientTick(DeltaSeconds);
+		return;
+	}
+	RepHP = CurrentHP;
+
 	if (State == EFuyuEnemyState::Dead)
 	{
 		return;
@@ -335,7 +363,7 @@ void AFuyuEnemy::Tick(float DeltaSeconds)
 		Posture = FMath::Max(Posture - 16.0f * DeltaSeconds, 0.0f);
 	}
 
-	AFuyuSamurai* Player = Cast<AFuyuSamurai>(UGameplayStatics::GetPlayerPawn(this, 0));
+	AFuyuSamurai* Player = FindPrey();
 	if (!Player || Player->IsDead())
 	{
 		if (IsAggressive() && State != EFuyuEnemyState::Attack)
@@ -598,6 +626,11 @@ void AFuyuEnemy::BeginAttack()
 			HandleAttackFinished();
 		}
 	}
+
+	if (GetNetMode() != NM_Standalone)
+	{
+		MulticastAttack(bHeavyAttack, (uint8)(bHeavyAttack ? TargetChargeLoops : TargetComboCount), AttackRate);
+	}
 }
 
 void AFuyuEnemy::HandleAttackFinished()
@@ -614,36 +647,40 @@ void AFuyuEnemy::HandleAttackFinished()
 
 void AFuyuEnemy::DoAttackTrace(FName DamageSourceBone)
 {
-	if (State != EFuyuEnemyState::Attack)
+	if (!HasAuthority() || State != EFuyuEnemyState::Attack)
 	{
 		return;
 	}
 
-	AFuyuSamurai* Player = Cast<AFuyuSamurai>(UGameplayStatics::GetPlayerPawn(this, 0));
-	if (!Player || Player->IsDead())
+	// the swing catches every player standing in its arc, not just the one it was aimed at
+	for (TActorIterator<AFuyuSamurai> It(GetWorld()); It; ++It)
 	{
-		return;
+		AFuyuSamurai* Player = *It;
+		if (Player->IsDead())
+		{
+			continue;
+		}
+
+		const FVector To = Player->GetActorLocation() - GetActorLocation();
+		const float Distance = To.Size2D();
+		const float Reach = (AttackReach + 35.0f) * GetActorScale3D().X;
+		if (Distance > Reach || FMath::Abs(To.Z) > 240.0f)
+		{
+			continue;
+		}
+
+		if (Distance > 100.0f && FVector::DotProduct(To.GetSafeNormal2D(), GetActorForwardVector()) < 0.35f)
+		{
+			continue;
+		}
+
+		const FVector Dir = To.GetSafeNormal2D();
+		const FVector HitLocation = Player->GetActorLocation() - Dir * 30.0f + FVector(0, 0, 40.0f);
+		const float Damage = AttackDamage * (bHeavyAttack ? 1.7f : 1.0f);
+		const FVector Impulse = Dir * (bHeavyAttack ? 520.0f : 260.0f) + FVector::UpVector * (bHeavyAttack ? 330.0f : 240.0f);
+
+		Player->ApplyDamage(Damage, this, HitLocation, Impulse);
 	}
-
-	const FVector To = Player->GetActorLocation() - GetActorLocation();
-	const float Distance = To.Size2D();
-	const float Reach = (AttackReach + 35.0f) * GetActorScale3D().X;
-	if (Distance > Reach || FMath::Abs(To.Z) > 240.0f)
-	{
-		return;
-	}
-
-	if (Distance > 100.0f && FVector::DotProduct(To.GetSafeNormal2D(), GetActorForwardVector()) < 0.35f)
-	{
-		return;
-	}
-
-	const FVector Dir = To.GetSafeNormal2D();
-	const FVector HitLocation = Player->GetActorLocation() - Dir * 30.0f + FVector(0, 0, 40.0f);
-	const float Damage = AttackDamage * (bHeavyAttack ? 1.7f : 1.0f);
-	const FVector Impulse = Dir * (bHeavyAttack ? 520.0f : 260.0f) + FVector::UpVector * (bHeavyAttack ? 330.0f : 240.0f);
-
-	Player->ApplyDamage(Damage, this, HitLocation, Impulse);
 }
 
 void AFuyuEnemy::ApplyDamage(float Damage, AActor* DamageCauser, const FVector& DamageLocation, const FVector& DamageImpulse)
@@ -690,6 +727,7 @@ EFuyuStrikeResult AFuyuEnemy::ReceiveStrike(const FFuyuStrike& Strike)
 		ShowGlint(false);
 		LastDamageTaken = 0.0f;
 		UFuyuAudio::Play(this, EFuyuSound::Guard, Strike.Location);
+		Cue(6, Strike.Location);
 		GetCharacterMovement()->AddImpulse(Strike.Direction * 180.0f, true);
 
 		// a guarded cut does no harm but still wears the guard down, and a heavy blow hammers it
@@ -795,6 +833,8 @@ void AFuyuEnemy::OnParried(AActor* By)
 
 void AFuyuEnemy::PlayReaction(bool bHeavy)
 {
+	Cue(bHeavy ? 3 : 2);
+
 	UAnimInstance* Anim = GetMesh()->GetAnimInstance();
 	if (!Anim || !ComboAttackMontage || ComboAttackMontage->SlotAnimTracks.Num() == 0)
 	{
@@ -810,6 +850,8 @@ void AFuyuEnemy::PlayReaction(bool bHeavy)
 
 void AFuyuEnemy::ShowGlint(bool bUnblockable)
 {
+	Cue(bUnblockable ? 1 : 0);
+
 	GlintTime = 0.0f;
 
 	// white warns of a blow that can be parried, red of one that must be dodged

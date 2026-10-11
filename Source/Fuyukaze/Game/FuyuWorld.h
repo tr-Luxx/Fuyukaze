@@ -61,6 +61,12 @@ public:
 	/** Hangs a glowing crescent in the air along a sword cut. Roll tilts the plane of the cut */
 	void SpawnSlash(const FVector& Origin, const FVector& Forward, float RollDegrees, float Size, const FLinearColor& Color);
 
+	/** Draws a streak of light from A to B that lingers and fades, marking the path of a blink-dash */
+	void SpawnTrail(const FVector& A, const FVector& B, const FLinearColor& Color, float Life = 1.8f);
+
+	/** 0 to 1: drains colour and closes the vignette in, for the held moment of the ultimate */
+	void SetFocusGrade(float Amount) { FocusGrade = FMath::Clamp(Amount, 0.0f, 1.0f); }
+
 	/** Kicks the picture for an instant: colour fringing, bloom and a tighter vignette */
 	void PunchScreen(float Strength);
 
@@ -294,6 +300,17 @@ protected:
 	};
 	TArray<FSlash> SlashState;
 	int32 NextSlash = 0;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UStaticMeshComponent>> TrailMeshes;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<class UMaterialInstanceDynamic>> TrailMaterials;
+
+	TArray<FSlash> TrailState;
+	int32 NextTrail = 0;
+	float FocusGrade = 0.0f;
+	float AppliedFocus = 0.0f;
 
 	FParticlePool Sparks;
 	FParticlePool BurstLeaves;

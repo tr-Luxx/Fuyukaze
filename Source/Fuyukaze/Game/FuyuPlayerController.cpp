@@ -43,12 +43,19 @@ void AFuyuPlayerController::SetupInputComponent()
 
 void AFuyuPlayerController::TogglePause()
 {
-	SetPause(!IsPaused());
+	if (GetNetMode() == NM_Standalone)
+	{
+		SetPause(!IsPaused());
+	}
+	else
+	{
+		bMenuOpen = !bMenuOpen;
+	}
 }
 
 void AFuyuPlayerController::QuitIfPaused()
 {
-	if (IsPaused())
+	if (IsPaused() || bMenuOpen)
 	{
 		UKismetSystemLibrary::QuitGame(this, this, EQuitPreference::Quit, false);
 	}

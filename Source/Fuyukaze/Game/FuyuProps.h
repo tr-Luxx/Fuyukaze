@@ -63,6 +63,7 @@ namespace FuyuProps
 		PathSlab,
 		Pagoda,
 		Bird,
+		TrailLine,
 		Count
 	};
 

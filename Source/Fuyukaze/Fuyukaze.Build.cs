@@ -21,6 +21,7 @@ public class Fuyukaze : ModuleRules
 			"Slate",
 			"SlateCore",
 			"Niagara",
+			"NetCore",
 			"PhysicsCore",
 			"ProceduralMeshComponent",
 			"MeshDescription",

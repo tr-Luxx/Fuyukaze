@@ -744,6 +744,32 @@ namespace
 			return Mesh;
 		}
 
+		if (Prop == FuyuProps::EProp::TrailLine)
+		{
+			// a streak of light one metre long, as two crossed ribbons so it reads from any side. V is 1 along
+			// the spine and 0 at the edges, which the slash material turns into a bright core with a soft falloff
+			for (int32 Plane = 0; Plane < 2; ++Plane)
+			{
+				const FVector Across = Plane == 0 ? FVector(0, 1, 0) : FVector(0, 0, 1);
+				const int32 Segs = 12;
+				TArray<int32> Rows[3];
+				for (int32 i = 0; i <= Segs; ++i)
+				{
+					const float T = (float)i / Segs;
+					for (int32 r = 0; r < 3; ++r)
+					{
+						Rows[r].Add(B.AddVertex(FVector(T * 100.0f, 0, 0) + Across * (r - 1.0f), FVector::UpVector, FVector2D(T, r == 1 ? 1.0 : 0.0), FLinearColor::White));
+					}
+				}
+				for (int32 i = 0; i < Segs; ++i)
+				{
+					B.AddQuad(Rows[0][i], Rows[0][i + 1], Rows[1][i + 1], Rows[1][i]);
+					B.AddQuad(Rows[1][i], Rows[1][i + 1], Rows[2][i + 1], Rows[2][i]);
+				}
+			}
+			return B.Build(GetTransientPackage(), TEXT("SM_TrailLine"), { M.Slash });
+		}
+
 		// a bird seen from far below: a small body and two long wings. Alpha rises towards the wingtips,
 		// which the bird material uses to make them beat
 		const FLinearColor Body(1, 1, 1, 0), Mid(1, 1, 1, 0.45f), Tip(1, 1, 1, 1);
@@ -866,6 +892,7 @@ UStaticMesh* FuyuProps::Get(EProp Prop)
 	case EProp::PathSlab:
 	case EProp::Pagoda:
 	case EProp::Bird:
+	case EProp::TrailLine:
 		Mesh = MakeScenery(Prop);
 		break;
 	default:

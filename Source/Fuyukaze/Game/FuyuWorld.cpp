@@ -233,6 +233,21 @@ void AFuyuWorld::BeginPlay()
 		SlashState.AddDefaulted();
 	}
 
+	for (int32 i = 0; i < 12; ++i)
+	{
+		UStaticMeshComponent* Line = NewObject<UStaticMeshComponent>(this);
+		Line->SetStaticMesh(FuyuProps::Get(EProp::TrailLine));
+		Line->SetMobility(EComponentMobility::Movable);
+		Line->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Line->SetCastShadow(false);
+		Line->SetVisibility(false);
+		Line->SetupAttachment(Root);
+		Line->RegisterComponent();
+		TrailMeshes.Add(Line);
+		TrailMaterials.Add(Line->CreateDynamicMaterialInstance(0));
+		TrailState.AddDefaulted();
+	}
+
 	ApplyGrade();
 
 	const FFuyuSite* Start = FuyuTerrain::FindSite(TEXT("Start"));
@@ -388,6 +403,32 @@ void AFuyuWorld::SpawnSlash(const FVector& Origin, const FVector& Forward, float
 	}
 }
 
+void AFuyuWorld::SpawnTrail(const FVector& A, const FVector& B, const FLinearColor& Color, float Life)
+{
+	if (TrailMeshes.Num() == 0 || FVector::DistSquared(A, B) < 1.0f)
+	{
+		return;
+	}
+
+	NextTrail = (NextTrail + 1) % TrailMeshes.Num();
+	FSlash& Trail = TrailState[NextTrail];
+	Trail.Age = 0.0f;
+	Trail.Life = Life;
+	Trail.Size = FVector::Dist(A, B) / 100.0f;
+
+	// the mesh is a metre long along X, so stretch it to span the two points and thicken it a little
+	UStaticMeshComponent* Line = TrailMeshes[NextTrail];
+	Line->SetWorldLocationAndRotation(A, (B - A).Rotation());
+	Line->SetWorldScale3D(FVector(Trail.Size, 14.0f, 14.0f));
+	Line->SetVisibility(true);
+
+	if (UMaterialInstanceDynamic* Mat = TrailMaterials[NextTrail])
+	{
+		Mat->SetVectorParameterValue(TEXT("Tint"), Color);
+		Mat->SetScalarParameterValue(TEXT("Fade"), 1.0f);
+	}
+}
+
 void AFuyuWorld::PunchScreen(float Strength)
 {
 	ScreenPunch = FMath::Max(ScreenPunch, FMath::Clamp(Strength, 0.0f, 1.0f));
@@ -479,6 +520,49 @@ void AFuyuWorld::UpdateEffects(float DeltaSeconds)
 		}
 	}
 
+	// trails burn bright, then thin and fade
+	for (int32 i = 0; i < TrailState.Num(); ++i)
+	{
+		FSlash& Trail = TrailState[i];
+		if (Trail.Age >= Trail.Life)
+		{
+			continue;
+		}
+
+		Trail.Age += DeltaSeconds;
+		const float T = FMath::Clamp(Trail.Age / Trail.Life, 0.0f, 1.0f);
+		const float Width = FMath::Lerp(22.0f, 3.0f, FMath::Sqrt(T));
+		TrailMeshes[i]->SetWorldScale3D(FVector(Trail.Size, Width, Width));
+
+		if (UMaterialInstanceDynamic* Mat = TrailMaterials[i])
+		{
+			Mat->SetScalarParameterValue(TEXT("Fade"), FMath::Square(1.0f - T) * 1.6f);
+		}
+
+		if (T >= 1.0f)
+		{
+			TrailMeshes[i]->SetVisibility(false);
+		}
+	}
+
+	// the ultimate's focus drains the colour out of the world and closes the frame in around the samurai
+	if (!FMath::IsNearlyEqual(FocusGrade, AppliedFocus, 0.002f) || FocusGrade > 0.0f)
+	{
+		AppliedFocus = FocusGrade;
+		ApplyGrade();
+
+		FPostProcessSettings& S = PostProcess->Settings;
+		const FVector4 Cold(0.1, 0.13, 0.22, 1.0);
+		S.ColorSaturation = FMath::Lerp(S.ColorSaturation, Cold, (double)FocusGrade);
+		S.ColorContrast = S.ColorContrast * (1.0 + 0.22 * FocusGrade);
+		S.VignetteIntensity += 0.2f * FocusGrade;
+		S.FilmGrainIntensity += 0.25f * FocusGrade;
+
+		// a cold cast over what colour is left, and no motion blur, so the fast camera cuts stay crisp
+		S.ColorGain = FMath::Lerp(FVector4(1.0, 1.0, 1.0, 1.0), FVector4(0.9, 1.0, 1.22, 1.0), (double)FocusGrade);
+		S.MotionBlurAmount = 0.22f * (1.0f - FocusGrade);
+	}
+
 	// the screen punch rides on top of the colour grade and decays in about a quarter of a second
 	if (ScreenPunch > 0.0f || PostProcess->Settings.SceneFringeIntensity > 0.0f)
 	{
@@ -488,7 +572,7 @@ void AFuyuWorld::UpdateEffects(float DeltaSeconds)
 		S.bOverride_SceneFringeIntensity = true;
 		S.SceneFringeIntensity = 2.2f * ScreenPunch;
 		S.BloomIntensity = 0.9f + 0.9f * ScreenPunch;
-		S.VignetteIntensity = (bCinemaMode ? 0.75f : 0.42f) + 0.35f * ScreenPunch;
+		S.VignetteIntensity = (bCinemaMode ? 0.75f : 0.42f) + 0.35f * ScreenPunch + 0.2f * FocusGrade;
 	}
 }
 
@@ -1091,9 +1175,10 @@ void AFuyuWorld::BuildMemorial(const FFuyuSite& Site)
 	}
 
 	// a small wayside shrine watches over them, with a pair of lanterns
-	Place(EProp::ShrineHall, SitePoint(Site, -600.0f, 1500.0f), Site.Yaw + 90.0f, 0.32f);
-	Place(EProp::StoneLantern, SitePoint(Site, -250.0f, 1050.0f), Site.Yaw);
-	Place(EProp::StoneLantern, SitePoint(Site, -950.0f, 1050.0f), Site.Yaw);
+	// the hall stands about three times the samurai's height
+	Place(EProp::ShrineHall, SitePoint(Site, -600.0f, 1800.0f), Site.Yaw + 90.0f, 0.76f);
+	Place(EProp::StoneLantern, SitePoint(Site, -120.0f, 1280.0f), Site.Yaw);
+	Place(EProp::StoneLantern, SitePoint(Site, -1080.0f, 1280.0f), Site.Yaw);
 
 	// ground mist pools here, and crows turn overhead
 	const FVector Center = SitePoint(Site, 0.0f, 0.0f);
@@ -1607,6 +1692,9 @@ void AFuyuWorld::ApplyGrade()
 	// a little blur keeps sword swings fluid, but the default amount smears the whole screen on a fast camera
 	S.bOverride_MotionBlurAmount = true;
 	S.MotionBlurAmount = 0.22f;
+
+	S.bOverride_ColorGain = true;
+	S.ColorGain = FVector4(1.0, 1.0, 1.0, 1.0);
 
 	S.bOverride_VignetteIntensity = true;
 	S.bOverride_FilmGrainIntensity = true;

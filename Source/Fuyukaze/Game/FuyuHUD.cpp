@@ -1,6 +1,8 @@
 #include "FuyuHUD.h"
 #include "FuyuEnemy.h"
 #include "FuyuGameMode.h"
+#include "FuyuGameState.h"
+#include "FuyuPlayerController.h"
 #include "FuyuSamurai.h"
 #include "CanvasItem.h"
 #include "Engine/Canvas.h"
@@ -84,7 +86,8 @@ void AFuyuHUD::DrawHUD()
 	Scale = H / 1080.0f;
 	const float S = Scale;
 
-	const AFuyuGameMode* GameMode = GetWorld()->GetAuthGameMode<AFuyuGameMode>();
+	// the game mode only exists on the host, so the HUD reads the replicated game state instead
+	const AFuyuGameState* GameMode = GetWorld()->GetGameState<AFuyuGameState>();
 	const AFuyuSamurai* Samurai = Cast<AFuyuSamurai>(PlayerOwner->GetPawn());
 
 	const bool bHelpKeyDown = PlayerOwner->IsInputKeyDown(EKeys::F1);
@@ -145,6 +148,13 @@ void AFuyuHUD::DrawHUD()
 			Diamond(CX, CY, 8.5f * S * FMath::Max(Fill, 0.0f), Fill >= 1.0f ? Gold : Fade(Gold, 0.55f));
 		}
 		Text(TEXT("F  heal"), X + 14.0f * S + Samurai->GetMaxResolve() * 30.0f * S, Y - 32.0f * S, 13.0f, Fade(Paper, 0.6f));
+
+		// a full meter can be spent all at once on the ultimate
+		if (Samurai->IsUltimateReady())
+		{
+			const float Pulse = 0.65f + 0.35f * FMath::Sin(GetWorld()->GetRealTimeSeconds() * 5.0f);
+			Text(TEXT("R  WINTER WIND"), X + 96.0f * S + Samurai->GetMaxResolve() * 30.0f * S, Y - 33.0f * S, 14.0f, Fade(FLinearColor(0.7f, 0.92f, 1.0f, 1.0f), Pulse), false, TEXT("Bold"), 160);
+		}
 
 		// stance wheel
 		const EFuyuStance Stances[] = { EFuyuStance::Stone, EFuyuStance::Wind, EFuyuStance::Moon };
@@ -213,6 +223,50 @@ void AFuyuHUD::DrawHUD()
 		{
 			Text(FString::Printf(TEXT("%s stance breaks this guard"), FuyuCombat::StanceName(Counter)), W * 0.5f, BY + 28.0f * S, 13.0f, Fade(Gold, 0.85f), true);
 		}
+	}
+
+	// --- other players ---------------------------------------------------------------------------
+	for (TActorIterator<AFuyuSamurai> It(GetWorld()); It; ++It)
+	{
+		const AFuyuSamurai* Other = *It;
+		if (Other == Samurai || Other->IsDead() || FVector::Dist(Other->GetActorLocation(), Samurai->GetActorLocation()) > 6000.0f)
+		{
+			continue;
+		}
+
+		// a name and a health bar float over each fellow player
+		const FVector Screen = Canvas->Project(Other->GetActorLocation() + FVector(0, 0, 125.0f));
+		if (Screen.Z > 0.0f)
+		{
+			const bool bRival = Samurai->GetDuelOpponent() == Other;
+			const float BW = 84.0f * S;
+			Text(Other->GetPlayerLabel(), Screen.X, Screen.Y - 26.0f * S, 13.0f, bRival ? Blood : Paper, true, TEXT("Bold"));
+			Rect(Screen.X - BW * 0.5f - S, Screen.Y - S, BW + 2.0f * S, 7.0f * S, Ink);
+			Rect(Screen.X - BW * 0.5f, Screen.Y, BW * Other->GetHealthFraction(), 5.0f * S, bRival ? Blood : FLinearColor(0.35f, 0.7f, 0.35f));
+		}
+	}
+
+	// a duel puts the opponent's name and health at the top of the screen
+	if (const AFuyuSamurai* Rival = Samurai->GetDuelOpponent())
+	{
+		const float BW = 520.0f * S, BX = W * 0.5f - BW * 0.5f, BY = 172.0f * S;
+		Text(FString::Printf(TEXT("DUEL  -  %s"), *Rival->GetPlayerLabel().ToUpper()), W * 0.5f, BY - 34.0f * S, 18.0f, Gold, true, TEXT("Regular"), 200);
+		Rect(BX - 2.0f * S, BY - 2.0f * S, BW + 4.0f * S, 14.0f * S, Ink);
+		Rect(BX, BY, BW * Rival->GetHealthFraction(), 10.0f * S, Blood);
+	}
+	else if (const AFuyuSamurai* Challenger = Samurai->GetChallenger())
+	{
+		const float Pulse = 0.7f + 0.3f * FMath::Sin(GetWorld()->GetRealTimeSeconds() * 6.0f);
+		Text(FString::Printf(TEXT("%s challenges you   -   press V to accept"), *Challenger->GetPlayerLabel()), W * 0.5f, H * 0.3f, 20.0f, Fade(Gold, Pulse), true, TEXT("Bold"));
+	}
+
+	// private title card for this player alone: duel won, challenge sent and so on
+	const float NoticeAge = Samurai->GetNoticeAge();
+	if (NoticeAge < 5.0f && !Samurai->GetNoticeTitle().IsEmpty())
+	{
+		const float Alpha = FMath::Clamp(NoticeAge / 0.3f, 0.0f, 1.0f) * FMath::Clamp((5.0f - NoticeAge) / 1.0f, 0.0f, 1.0f);
+		Text(Samurai->GetNoticeTitle(), W * 0.5f, H * 0.36f, 40.0f, Fade(Paper, Alpha), true, TEXT("Light"), 400);
+		Text(Samurai->GetNoticeSubtitle(), W * 0.5f, H * 0.36f + 78.0f * S, 18.0f, Fade(Paper, Alpha * 0.9f), true, TEXT("Italic"), 60);
 	}
 
 	// --- hit feedback --------------------------------------------------------------------------
@@ -299,7 +353,8 @@ void AFuyuHUD::DrawHUD()
 		Text(TEXT("The wind carries you back."), W * 0.5f, H * 0.42f + 84.0f * S, 18.0f, Fade(Paper, 0.85f), true, TEXT("Italic"));
 	}
 
-	if (PlayerOwner->IsPaused())
+	const AFuyuPlayerController* FuyuPC = Cast<AFuyuPlayerController>(PlayerOwner);
+	if (PlayerOwner->IsPaused() || (FuyuPC && FuyuPC->IsMenuOpen()))
 	{
 		Rect(0, 0, W, H, FLinearColor(0.0f, 0.0f, 0.0f, 0.55f));
 		Text(TEXT("PAUSED"), W * 0.5f, H * 0.4f, 46.0f, Paper, true, TEXT("Light"), 600);
@@ -316,12 +371,13 @@ void AFuyuHUD::DrawHUD()
 			{ TEXT("Q"),    TEXT("guard / parry"), TEXT("Alt"),   TEXT("dodge") },
 			{ TEXT("Tab"),  TEXT("lock on"),       TEXT("1 2 3"), TEXT("stance") },
 			{ TEXT("F"),    TEXT("heal"),          TEXT("G"),     TEXT("guiding wind") },
-			{ TEXT("K"),    TEXT("cinema mode"),   TEXT("Esc"),   TEXT("pause") },
+			{ TEXT("K"),    TEXT("cinema mode"),   TEXT("V"),     TEXT("duel a player") },
+			{ TEXT("R"),    TEXT("ultimate"),      TEXT("Esc"),   TEXT("pause") },
 		};
 
 		const float X = W - 470.0f * S;
-		float Y = H - 196.0f * S;
-		Rect(X - 18.0f * S, Y - 14.0f * S, 448.0f * S, 172.0f * S, FLinearColor(0.0f, 0.0f, 0.0f, 0.35f));
+		float Y = H - 220.0f * S;
+		Rect(X - 18.0f * S, Y - 14.0f * S, 448.0f * S, 196.0f * S, FLinearColor(0.0f, 0.0f, 0.0f, 0.35f));
 		for (const auto& Line : Lines)
 		{
 			Text(Line[0], X, Y, 13.0f, Gold, false, TEXT("Bold"));
@@ -331,10 +387,29 @@ void AFuyuHUD::DrawHUD()
 			Y += 24.0f * S;
 		}
 
-		Text(TEXT("F1  hide"), W - 104.0f * S, H - 222.0f * S, 11.0f, Fade(Paper, 0.45f));
+		Text(TEXT("F1  hide"), W - 104.0f * S, H - 246.0f * S, 11.0f, Fade(Paper, 0.45f));
 	}
 	else
 	{
 		Text(TEXT("F1  controls"), W - 150.0f * S, H - 50.0f * S, 12.0f, Fade(Paper, 0.4f));
+	}
+
+	// --- ultimate ------------------------------------------------------------------------------
+	// black bars slide in from top and bottom while it plays, and its name appears in the held breath
+	const float Focus = Samurai->GetUltimateFocus();
+	if (Focus > 0.0f)
+	{
+		const float Bar = H * 0.115f * FMath::InterpEaseOut(0.0f, 1.0f, Focus, 2.0f);
+		Rect(0, 0, W, Bar, FLinearColor(0.0f, 0.0f, 0.0f, 1.0f));
+		Rect(0, H - Bar, W, Bar, FLinearColor(0.0f, 0.0f, 0.0f, 1.0f));
+	}
+
+	const float Title = Samurai->GetUltimateTitle();
+	if (Title > 0.0f)
+	{
+		const FLinearColor Ice(0.75f, 0.92f, 1.0f, 1.0f);
+		Rect(W * 0.5f - 260.0f * S * Title, H * 0.76f + 74.0f * S, 520.0f * S * Title, 2.0f * S, Fade(Ice, Title * 0.9f));
+		Text(TEXT("WINTER WIND"), W * 0.5f, H * 0.76f, 44.0f, Fade(Paper, Title), true, TEXT("Light"), 700 + FMath::RoundToInt32(300.0f * Title));
+		Text(TEXT("fuyukaze"), W * 0.5f, H * 0.76f + 86.0f * S, 17.0f, Fade(Ice, Title * 0.9f), true, TEXT("Italic"), 500);
 	}
 }

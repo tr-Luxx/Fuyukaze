@@ -172,6 +172,14 @@ namespace
 			S.Partial(5540.0f, 0.14f, 0.2f, 0.09f);
 			return S.Finish(0.8f);
 		}
+		case EFuyuSound::Charge:
+		{
+			FSynth S(0.9f, 21);
+			S.Whoosh(180.0f, 4200.0f, 1.0f, 0.35f);
+			S.Partial(110.0f, 0.5f, 0.6f, 0.0f, 2.2f);
+			S.Partial(220.0f, 0.25f, 0.5f, 0.1f, 2.2f);
+			return S.Finish(0.7f);
+		}
 		default:
 		{
 			// a rising pair of soft tones

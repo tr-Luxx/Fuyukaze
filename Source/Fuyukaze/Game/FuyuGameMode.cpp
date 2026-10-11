@@ -1,6 +1,7 @@
 #include "FuyuGameMode.h"
 #include "FuyuAudio.h"
 #include "FuyuEnemy.h"
+#include "FuyuGameState.h"
 #include "FuyuHUD.h"
 #include "FuyuPlayerController.h"
 #include "FuyuSamurai.h"
@@ -90,6 +91,7 @@ AFuyuGameMode::AFuyuGameMode()
 
 	PlayerControllerClass = AFuyuPlayerController::StaticClass();
 	HUDClass = AFuyuHUD::StaticClass();
+	GameStateClass = AFuyuGameState::StaticClass();
 }
 
 void AFuyuGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
@@ -136,7 +138,9 @@ void AFuyuGameMode::RestartPlayer(AController* NewPlayer)
 		return;
 	}
 
-	const FVector Location = AFuyuWorld::SitePoint(*Start, 0.0f, 0.0f) + FVector(0, 0, 110.0f);
+	// later players arrive beside the first, not inside her
+	const int32 Slot = FMath::Max(GetNumPlayers() - 1, 0);
+	const FVector Location = AFuyuWorld::SitePoint(*Start, -180.0f * ((Slot + 1) / 2), (Slot % 2 == 0 ? 1.0f : -1.0f) * 200.0f * ((Slot + 1) / 2)) + FVector(0, 0, 110.0f);
 	RestartPlayerAtTransform(NewPlayer, FTransform(FRotator(0, Start->Yaw, 0), Location));
 
 	// start looking at the mountain rather than at the back of the character's head
@@ -256,6 +260,12 @@ void AFuyuGameMode::ShowBanner(const FText& Title, const FText& Subtitle)
 	Banner = Title;
 	BannerSubtitle = Subtitle;
 	BannerTime = GetWorld()->GetTimeSeconds();
+
+	// the game state carries it to every player
+	if (AFuyuGameState* Shared = GetGameState<AFuyuGameState>())
+	{
+		Shared->ShowBanner(Title, Subtitle);
+	}
 }
 
 float AFuyuGameMode::GetBannerAge() const
@@ -358,6 +368,10 @@ void AFuyuGameMode::NotifyEnemyKilled(AFuyuEnemy* Enemy)
 	if (Enemy->GetEnemyType() == EFuyuEnemyType::Duelist)
 	{
 		bVictory = true;
+		if (AFuyuGameState* Shared = GetGameState<AFuyuGameState>())
+		{
+			Shared->bVictory = true;
+		}
 		ShowBanner(LOCTEXT("Victory", "THE FIRST SNOW FALLS"), LOCTEXT("VictorySub", "Raiko is defeated. The island breathes again."));
 		return;
 	}
@@ -372,15 +386,21 @@ void AFuyuGameMode::NotifyEnemyKilled(AFuyuEnemy* Enemy)
 		World->SetSiteLiberated(Site->Id);
 	}
 
-	if (Player)
+	// the banners come down on every player's machine
+	if (AFuyuGameState* Shared = GetGameState<AFuyuGameState>())
 	{
-		Player->Restore(0.5f, 1.0f);
+		Shared->AddLiberatedSite(Site->Id);
 	}
 
-	// a freed camp becomes the place the samurai returns to if she falls
-	if (AFuyuPlayerController* PC = Cast<AFuyuPlayerController>(UGameplayStatics::GetPlayerController(this, 0)))
+	// every player shares in the reward, and a freed camp becomes the place they return to if they fall
+	int32 Slot = 0;
+	for (TActorIterator<AFuyuPlayerController> It(GetWorld()); It; ++It, ++Slot)
 	{
-		PC->SetRespawnTransform(FTransform(FRotator(0, Site->Yaw + 180.0f, 0), AFuyuWorld::SitePoint(*Site, 400.0f, 0.0f) + FVector(0, 0, 110.0f)));
+		if (AFuyuSamurai* Samurai = Cast<AFuyuSamurai>(It->GetPawn()))
+		{
+			Samurai->Restore(0.5f, 1.0f);
+		}
+		It->SetRespawnTransform(FTransform(FRotator(0, Site->Yaw + 180.0f, 0), AFuyuWorld::SitePoint(*Site, 400.0f, (Slot - 0.5f) * 220.0f) + FVector(0, 0, 110.0f)));
 	}
 
 	if (FindNextCamp())
@@ -414,6 +434,13 @@ void AFuyuGameMode::Tick(float DeltaSeconds)
 				}
 			}
 		}
+	}
+
+	// keep the shared objective current
+	if (AFuyuGameState* Shared = GetGameState<AFuyuGameState>())
+	{
+		Shared->ObjectiveText = GetObjectiveText();
+		Shared->ObjectiveLocation = GetObjectiveLocation();
 	}
 
 	if (bBot)
@@ -467,6 +494,14 @@ void AFuyuGameMode::TickTour(float DeltaSeconds)
 		if (bBot && BotExtraTime > 0.0f && !bVictory)
 		{
 			BotExtraTime -= DeltaSeconds;
+
+			// during the ultimate, show what the player would see: its camera work is part of the effect
+			const AFuyuSamurai* Caster = Cast<AFuyuSamurai>(PC->GetPawn());
+			AActor* WantedView = (Caster && (Caster->IsUltimateActive() || Caster->GetUltimateFocus() > 0.0f)) ? (AActor*)PC->GetPawn() : (AActor*)TourCamera;
+			if (PC->GetViewTarget() != WantedView)
+			{
+				PC->SetViewTarget(WantedView);
+			}
 
 			if (const APawn* Pawn = PC->GetPawn())
 			{
@@ -563,7 +598,9 @@ void AFuyuGameMode::TickTour(float DeltaSeconds)
 
 void AFuyuGameMode::RequestMomentShot(const TCHAR* Tag)
 {
-	if (bTour && bBot && MomentShots < 16 && MomentDelayFrames == 0 && TourCamera)
+	// the ultimate is rare, so its shots are taken even when the ordinary quota has been used up
+	const bool bUltimate = FCString::Strncmp(Tag, TEXT("ult"), 3) == 0;
+	if (bTour && bBot && (MomentShots < 16 || bUltimate) && (MomentDelayFrames == 0 || bUltimate) && TourCamera)
 	{
 		MomentTag = Tag;
 		MomentDelayFrames = 3;
@@ -601,6 +638,32 @@ void AFuyuGameMode::TickBot(float DeltaSeconds)
 			Target ? Target->GetHealthFraction() * 100.0f : 0.0f, Target ? Target->GetPostureFraction() * 100.0f : 0.0f, Target ? (int32)Target->GetState() : -1);
 	}
 
+	// multiplayer: accept any challenge, and when a duel is on, fight the other player
+	if (Player->GetChallenger() && !Player->GetDuelOpponent())
+	{
+		Player->BotChallenge();
+	}
+
+	if (AFuyuSamurai* Rival = Player->GetDuelOpponent())
+	{
+		const FVector ToRival = Rival->GetActorLocation() - Player->GetActorLocation();
+		Player->BotLock(false);
+		if (ToRival.Size2D() > 215.0f)
+		{
+			Player->AddMovementInput(ToRival.GetSafeNormal2D(), 1.0f);
+		}
+		else
+		{
+			BotAttackTimer -= DeltaSeconds;
+			if (BotAttackTimer <= 0.0f)
+			{
+				BotAttackTimer = 0.34f;
+				Player->DoComboAttackStart();
+			}
+		}
+		return;
+	}
+
 	if (!Target)
 	{
 		return;
@@ -612,6 +675,34 @@ void AFuyuGameMode::TickBot(float DeltaSeconds)
 	}
 
 	const FVector To = (Target->GetActorLocation() - Player->GetActorLocation()).GetSafeNormal2D();
+
+	// with a full meter and a crowd to spend it on, use the ultimate. -FuyuBotUlt fills the meter the first
+	// time a crowd is in reach, so that a test run is sure to show it
+	static const bool bForceUltimate = FParse::Param(FCommandLine::Get(), TEXT("FuyuBotUlt"));
+	static bool bForcedOnce = false;
+
+	int32 Near = 0;
+	for (TActorIterator<AFuyuEnemy> It(GetWorld()); It; ++It)
+	{
+		Near += (!It->IsDead() && FVector::Dist(It->GetActorLocation(), Player->GetActorLocation()) < 1300.0f) ? 1 : 0;
+	}
+
+	if (bForceUltimate && !bForcedOnce && Near >= 3 && !Player->IsUltimateActive())
+	{
+		bForcedOnce = true;
+		Player->Restore(0.0f, 3.0f);
+	}
+
+	if (Player->IsUltimateReady() && Near >= 2)
+	{
+		Player->BotUltimate();
+		return;
+	}
+
+	if (Player->IsUltimateActive())
+	{
+		return;
+	}
 
 	Player->BotSprint(BestDistance > 1500.0f);
 	Player->BotLock(BestDistance < 900.0f);

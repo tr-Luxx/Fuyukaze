@@ -17,6 +17,9 @@ public:
 
 	AFuyuPlayerController();
 
+	/** In a shared game the world cannot be paused, so Esc opens a menu over it instead */
+	bool IsMenuOpen() const { return bMenuOpen; }
+
 protected:
 
 	virtual void SetupInputComponent() override;
@@ -25,4 +28,6 @@ protected:
 	/** Esc (or Menu on a gamepad) pauses; while paused, Enter quits to the desktop */
 	void TogglePause();
 	void QuitIfPaused();
+
+	bool bMenuOpen = false;
 };
