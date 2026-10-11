@@ -1,0 +1,11 @@
+# Unreal build output and caches
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+*.log
+
+# Fab content (Megascans, Megaplants). Licensed per account under the Fab Standard License and several
+# gigabytes in size, so it is not stored here. See "Scanned assets" in README.md to re-import it.
+Content/Fab/
+Content/Megaplant_Library/
