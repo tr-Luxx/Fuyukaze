@@ -149,13 +149,26 @@ void AFuyuHUD::DrawHUD()
 		}
 		Text(TEXT("F  heal"), X + 14.0f * S + Samurai->GetMaxResolve() * 30.0f * S, Y - 32.0f * S, 13.0f, Fade(Paper, 0.6f));
 
-		// a full meter can be spent all at once on the ultimate
-		if (Samurai->IsUltimateReady())
+		// the ultimate is charged by the same resolve meter, so show it as its own labelled bar
 		{
-			const float Pulse = 0.65f + 0.35f * FMath::Sin(GetWorld()->GetRealTimeSeconds() * 5.0f);
-			Text(TEXT("R  WINTER WIND"), X + 96.0f * S + Samurai->GetMaxResolve() * 30.0f * S, Y - 33.0f * S, 14.0f, Fade(FLinearColor(0.7f, 0.92f, 1.0f, 1.0f), Pulse), false, TEXT("Bold"), 160);
-		}
+			const float Charge = FMath::Clamp(Samurai->GetResolve() / FMath::Max((float)Samurai->GetMaxResolve(), 1.0f), 0.0f, 1.0f);
+			const bool bReady = Samurai->IsUltimateReady();
+			const float Pulse = bReady ? 0.7f + 0.3f * FMath::Sin(GetWorld()->GetRealTimeSeconds() * 6.0f) : 1.0f;
+			const FLinearColor Cold(0.62f, 0.88f, 1.0f, 1.0f);
+			const float UY = Y - 58.0f * S, UH = 7.0f * S;
 
+			Rect(X - 2.0f * S, UY - 2.0f * S, BarW + 4.0f * S, UH + 4.0f * S, Ink);
+			Rect(X, UY, BarW, UH, Fade(Paper, 0.12f));
+			Rect(X, UY, BarW * Charge, UH, bReady ? Fade(FLinearColor::White, Pulse) : Fade(Cold, 0.8f));
+			for (int32 i = 1; i < Samurai->GetMaxResolve(); ++i)
+			{
+				Rect(X + BarW * i / (float)Samurai->GetMaxResolve() - 1.0f * S, UY, 2.0f * S, UH, Ink);
+			}
+
+			Text(TEXT("WINTER WIND"), X, UY - 22.0f * S, 13.0f, bReady ? Fade(Cold, Pulse) : Fade(Paper, 0.65f), false, TEXT("Bold"), 160);
+			const FString Status = bReady ? FString(TEXT("READY   press R")) : FString::Printf(TEXT("%d%%"), FMath::FloorToInt32(Charge * 100.0f));
+			Text(Status, X + BarW - (bReady ? 138.0f : 40.0f) * S, UY - 22.0f * S, 13.0f, bReady ? Fade(Cold, Pulse) : Fade(Paper, 0.65f), false, bReady ? TEXT("Bold") : TEXT("Regular"), 160);
+		}
 		// stance wheel
 		const EFuyuStance Stances[] = { EFuyuStance::Stone, EFuyuStance::Wind, EFuyuStance::Moon };
 		const TCHAR* Foes[] = { TEXT("swords"), TEXT("spears"), TEXT("brutes") };
