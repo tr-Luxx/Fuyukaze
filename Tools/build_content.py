@@ -89,7 +89,64 @@ return float3(dir * bend, -abs(bend) * 0.22);
 """
 
 
-def wind_offset(material, vertex_color, amplitude, x, y):
+PART_CODE = """
+// Grass and flowers lean away from the samurai's feet and are pressed down a little, most strongly right
+// beside her and fading to nothing at the edge of the radius. P is the vertex, O the clump's root,
+// F the point between her feet, R the radius and S an overall strength.
+float2 away = P.xy - F.xy;
+float dist = length(away);
+float reach = saturate(1.0 - dist / max(R, 1.0));
+float level = saturate(1.0 - abs(O.z - F.z) / 170.0);
+float height = saturate((P.z - O.z) / 45.0);
+float push = reach * reach * level * height * S;
+float2 dir = dist > 0.01 ? away / dist : float2(1.0, 0.0);
+return float3(dir * push * 64.0, -push * 27.0);
+"""
+
+
+def shared_parameters():
+    """The collection the game writes the samurai's position into each frame. Made once and then kept,
+    because materials refer to its parameters by id."""
+    path = MAT_DIR + "/MPC_Fuyu"
+    if eal.does_asset_exist(path):
+        return unreal.load_asset(path)
+
+    collection = asset_tools.create_asset("MPC_Fuyu", MAT_DIR, unreal.MaterialParameterCollection, unreal.MaterialParameterCollectionFactoryNew())
+    feet = unreal.CollectionVectorParameter()
+    feet.set_editor_property("parameter_name", "PlayerFeet")
+    feet.set_editor_property("default_value", unreal.LinearColor(0.0, 0.0, -1000000.0, 0.0))
+    radius = unreal.CollectionScalarParameter()
+    radius.set_editor_property("parameter_name", "GrassPartRadius")
+    radius.set_editor_property("default_value", 135.0)
+    collection.set_editor_property("vector_parameters", [feet])
+    collection.set_editor_property("scalar_parameters", [radius])
+    eal.save_loaded_asset(collection)
+    log("built MPC_Fuyu")
+    return collection
+
+
+def part_offset(material, x, y, strength):
+    """World-position offset that parts foliage around the samurai. `strength` is a node giving its scale."""
+    collection = shared_parameters()
+    position = node(material, unreal.MaterialExpressionWorldPosition, x, y)
+    root = node(material, unreal.MaterialExpressionObjectPositionWS, x, y + 150)
+    feet = mel.create_material_expression(material, unreal.MaterialExpressionCollectionParameter, x, y + 300)
+    feet.set_editor_property("collection", collection)
+    feet.set_editor_property("parameter_name", "PlayerFeet")
+    radius = mel.create_material_expression(material, unreal.MaterialExpressionCollectionParameter, x, y + 450)
+    radius.set_editor_property("collection", collection)
+    radius.set_editor_property("parameter_name", "GrassPartRadius")
+
+    part = custom(material, x + 350, y, PART_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, ["P", "O", "F", "R", "S"])
+    link(position, "", part, "P")
+    link(root, "", part, "O")
+    link(feet, "", part, "F")
+    link(radius, "", part, "R")
+    link(strength, "", part, "S")
+    return part
+
+
+def wind_offset(material, vertex_color, amplitude, x, y, part=False):
     position = node(material, unreal.MaterialExpressionWorldPosition, x, y)
     time = node(material, unreal.MaterialExpressionTime, x, y + 150)
     amp = const(material, amplitude, x, y + 250)
@@ -98,7 +155,13 @@ def wind_offset(material, vertex_color, amplitude, x, y):
     link(time, "", wind, "T")
     link(vertex_color, "A", wind, "W")
     link(amp, "", wind, "A")
-    return wind
+    if not part:
+        return wind
+
+    both = node(material, unreal.MaterialExpressionAdd, x + 700, y)
+    link(wind, "", both, "A")
+    link(part_offset(material, x, y + 500, const(material, 1.0, x, y + 1100)), "", both, "B")
+    return both
 
 
 def finish(material):
@@ -267,7 +330,7 @@ def build_foliage(name, amplitude, roughness):
 
     out(m, const(m, roughness, -350, 350), "", MP.MP_ROUGHNESS)
     out(m, const(m, 0.15, -350, 450), "", MP.MP_SPECULAR)
-    out(m, wind_offset(m, vertex_color, amplitude, -900, 600), "", MP.MP_WORLD_POSITION_OFFSET)
+    out(m, wind_offset(m, vertex_color, amplitude, -900, 600, part=(name == "M_FuyuGrass")), "", MP.MP_WORLD_POSITION_OFFSET)
     finish(m)
 
 
@@ -378,6 +441,91 @@ def build_slash():
     finish(m)
 
 
+def build_flower():
+    """Flower carpets: white petals take the per-instance colour, so one mesh makes fields of any hue."""
+    m = new_material("M_FuyuFlower")
+    m.set_editor_property("two_sided", True)
+    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_TWO_SIDED_FOLIAGE)
+    vertex_color, albedo = vertex_albedo(m, -900, 0)
+    tint = node(m, unreal.MaterialExpressionPerInstanceCustomData3Vector, -900, 250, data_index=0, const_default_value=unreal.LinearColor(1.0, 1.0, 1.0, 1.0))
+
+    # only near-white vertices (the petals) are recoloured; leaves and stems keep their own green
+    color = custom(m, -350, 0, "float petal = saturate((min(C.r, min(C.g, C.b)) - 0.55) * 5.0); return lerp(C, T * 1.1, petal);", unreal.CustomMaterialOutputType.CMOT_FLOAT3, ["C", "T"])
+    link(albedo, "", color, "C")
+    link(tint, "", color, "T")
+    out(m, color, "", MP.MP_BASE_COLOR)
+
+    through = node(m, unreal.MaterialExpressionMultiply, -100, 200, const_b=0.45)
+    link(color, "", through, "A")
+    out(m, through, "", MP.MP_SUBSURFACE_COLOR)
+    out(m, const(m, 0.6, -350, 350), "", MP.MP_ROUGHNESS)
+    out(m, const(m, 0.2, -350, 450), "", MP.MP_SPECULAR)
+    out(m, wind_offset(m, vertex_color, 9.0, -900, 600, part=True), "", MP.MP_WORLD_POSITION_OFFSET)
+    finish(m)
+
+
+def build_bird():
+    """Distant birds: flat silhouettes whose wingtips beat, each on its own rhythm."""
+    m = new_material("M_FuyuBird")
+    m.set_editor_property("two_sided", True)
+    tint = node(m, unreal.MaterialExpressionPerInstanceCustomData3Vector, -700, 0, data_index=0, const_default_value=unreal.LinearColor(1.0, 1.0, 1.0, 1.0))
+    out(m, tint, "", MP.MP_BASE_COLOR)
+    out(m, const(m, 0.85, -350, 200), "", MP.MP_ROUGHNESS)
+
+    vertex_color = node(m, unreal.MaterialExpressionVertexColor, -900, 400)
+    time = node(m, unreal.MaterialExpressionTime, -900, 600)
+    random = node(m, unreal.MaterialExpressionPerInstanceRandom, -900, 750)
+    flap = custom(m, -450, 500, "float beat = sin(T * 9.0 + R * 6.2832); return float3(0.0, 0.0, beat * W * 34.0 - W * W * 6.0);", unreal.CustomMaterialOutputType.CMOT_FLOAT3, ["T", "R", "W"])
+    link(time, "", flap, "T")
+    link(random, "", flap, "R")
+    link(vertex_color, "A", flap, "W")
+    out(m, flap, "", MP.MP_WORLD_POSITION_OFFSET)
+    finish(m)
+
+
+def build_mist():
+    """Soft sheets of mist that lie in the valleys and against the foot of the mountain."""
+    m = new_material("M_FuyuMist")
+    m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    m.set_editor_property("two_sided", True)
+    m.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_VOLUMETRIC_NON_DIRECTIONAL)
+
+    cloud = unreal.load_asset("/Engine/EngineVolumetrics/Fogsheet/Materials/T_EV_FogSheet_CloudTex_01")
+    uv = node(m, unreal.MaterialExpressionTextureCoordinate, -1400, 0)
+    time = node(m, unreal.MaterialExpressionTime, -1400, 200)
+    uv_a = custom(m, -1100, 0, "return UV * 1.6 + float2(T * 0.004, T * 0.0025);", unreal.CustomMaterialOutputType.CMOT_FLOAT2, ["UV", "T"])
+    uv_b = custom(m, -1100, 200, "return UV.yx * 3.1 - float2(T * 0.006, T * 0.003);", unreal.CustomMaterialOutputType.CMOT_FLOAT2, ["UV", "T"])
+    for target in (uv_a, uv_b):
+        link(uv, "", target, "UV")
+        link(time, "", target, "T")
+    cloud_a = sample(m, cloud, uv_a, -800, 0)
+    cloud_b = sample(m, cloud, uv_b, -800, 200)
+
+    # thick in the middle of the sheet and feathered to nothing at its rim, broken up by two drifting layers of cloud.
+    # It also thins out close to the camera and where it meets the ground, so it never shows a hard line
+    depth = node(m, unreal.MaterialExpressionPixelDepth, -800, 450)
+    scene = node(m, unreal.MaterialExpressionSceneDepth, -800, 600)
+    shape = custom(m, -450, 100, """
+float rim = saturate(1.0 - length(UV - 0.5) * 2.0);
+float body = smoothstep(0.0, 0.55, rim);
+float wisps = saturate(A * 1.5 + B * 0.7 - 0.25);
+float near = saturate((D - 500.0) / 3500.0);
+float ground = saturate((S - D) / 1600.0);
+return body * lerp(0.4, 1.0, wisps) * near * ground * 0.8;
+""", unreal.CustomMaterialOutputType.CMOT_FLOAT1, ["UV", "A", "B", "D", "S"])
+    link(scene, "", shape, "S")
+    link(uv, "", shape, "UV")
+    link(cloud_a, "R", shape, "A")
+    link(cloud_b, "R", shape, "B")
+    link(depth, "", shape, "D")
+
+
+    out(m, node(m, unreal.MaterialExpressionConstant3Vector, -450, -150, constant=unreal.LinearColor(0.93, 0.96, 1.0, 1.0)), "", MP.MP_BASE_COLOR)
+    out(m, shape, "", MP.MP_OPACITY)
+    out(m, const(m, 1.0, -450, 500), "", MP.MP_ROUGHNESS)
+    finish(m)
+
+
 def reparent_copy(source, name, parent_class_path):
     path = BP_DIR + "/" + name
     if eal.does_asset_exist(path):
@@ -457,6 +605,34 @@ def enable_instancing():
         log("enabled instancing on " + base.get_name())
 
 
+def part_scanned_grass():
+    """Adds the same parting to Fab's Megascans foliage material, which the scanned grass uses. The scalar
+    parameter doubles as a marker so that running this twice does not add the effect twice."""
+    base = unreal.load_asset("/Game/Fab/Materials/Standard/M_MS_Foliage")
+    if base is None:
+        return
+    if "FuyuGrassPart" in [str(n) for n in mel.get_scalar_parameter_names(base)]:
+        log("M_MS_Foliage already parts around the samurai")
+        return
+
+    strength = node(base, unreal.MaterialExpressionScalarParameter, 600, 2400, parameter_name="FuyuGrassPart", default_value=1.0)
+    part = part_offset(base, 600, 1700, strength)
+
+    existing = mel.get_material_property_input_node(base, MP.MP_WORLD_POSITION_OFFSET)
+    if existing is None:
+        out(base, part, "", MP.MP_WORLD_POSITION_OFFSET)
+    else:
+        pin = mel.get_material_property_input_node_output_name(base, MP.MP_WORLD_POSITION_OFFSET)
+        both = node(base, unreal.MaterialExpressionAdd, 1300, 1700)
+        link(existing, pin, both, "A")
+        link(part, "", both, "B")
+        out(base, both, "", MP.MP_WORLD_POSITION_OFFSET)
+
+    mel.recompile_material(base)
+    eal.save_loaded_asset(base)
+    log("added parting to M_MS_Foliage")
+
+
 def main():
     for directory in (MAT_DIR, BP_DIR, "/Game/Fuyukaze/Maps"):
         if not eal.does_directory_exist(directory):
@@ -472,11 +648,15 @@ def main():
     build_water()
     build_streak()
     build_slash()
+    build_flower()
+    build_bird()
+    build_mist()
 
     reparent_copy("/Game/Variant_Combat/Blueprints/BP_CombatCharacter", "BP_FuyuSamurai", "/Script/Fuyukaze.FuyuSamurai")
     reparent_copy("/Game/Variant_Combat/Blueprints/AI/BP_CombatEnemy", "BP_FuyuEnemy", "/Script/Fuyukaze.FuyuEnemy")
 
     enable_instancing()
+    part_scanned_grass()
     build_map()
     report_mannequin_parameters()
     log("done")

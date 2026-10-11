@@ -41,7 +41,8 @@ namespace
 
 		float FOV;
 
-		/** 0 = plain, 1 = relative to the player, 2 = cinema mode, 3 = relative to the player with the guiding wind blowing */
+		/** 0 = plain, 1 = relative to the player, 2 = cinema mode, 3 = relative to the player with the guiding wind blowing,
+		    4 = plain, but the samurai is first stood at the look-at point (to photograph her among grass or flowers) */
 		int32 Mode;
 	};
 
@@ -58,8 +59,16 @@ namespace
 		{ TEXT("10_forest"),        nullptr,          FVector(34000, -30000, 190),  FVector(60000, -10000, 9000),  75.0f, 0 },
 		{ TEXT("11_island"),        nullptr,          FVector(-140000, -80000, 52000), FVector(30000, 5000, 9000), 62.0f, 0 },
 		{ TEXT("12_cinema_mode"),   TEXT("Start"),    FVector(-520, 190, 250),      FVector(9000, 300, 2300),      72.0f, 2 },
+		{ TEXT("15_white_field"),   nullptr,          FVector(-74800, -15800, 75),   FVector(30000, 2000, 16000),   74.0f, 0 },
+		{ TEXT("16_memorial"),      TEXT("Memorial"), FVector(3300, 260, 165),       FVector(-600, 300, 190),       70.0f, 0 },
+		{ TEXT("17_memorial_low"),  TEXT("Memorial"), FVector(1500, -700, 60),       FVector(-600, 1500, 260),      66.0f, 0 },
+		{ TEXT("18_violet_slope"),  nullptr,          FVector(-60500, 1500, 55),     FVector(-52000, 12000, 2200),  64.0f, 0 },
+		{ TEXT("19_pagoda"),        TEXT("Lookout"),  FVector(-3600, -1500, 260),    FVector(0, 0, 1300),           70.0f, 0 },
+		{ TEXT("20_mountain_mist"), nullptr,          FVector(-30000, -8000, 2600),  FVector(80000, 4000, 30000),   62.0f, 0 },
 		{ TEXT("13_guiding_wind"),  nullptr,          FVector(-560, 150, 210),      FVector(600, 0, 40),           84.0f, 3 },
 		{ TEXT("14_player_side"),   nullptr,          FVector(60, 420, 60),         FVector(60, 0, 10),            70.0f, 1 },
+		{ TEXT("21_in_the_flowers"), nullptr,         FVector(-74000, -14700, 190), FVector(-74200, -15000, 40),   60.0f, 4 },
+		{ TEXT("22_in_the_grass"),  nullptr,          FVector(-70800, -21700, 180), FVector(-71000, -22000, 40),   60.0f, 4 },
 	};
 
 	FVector GroundPoint(const FTourShot& Shot, const FVector& Local)
@@ -493,6 +502,14 @@ void AFuyuGameMode::TickTour(float DeltaSeconds)
 		if (AFuyuWorld* World = AFuyuWorld::Get(this))
 		{
 			World->BlowGuidingWind(GetObjectiveLocation());
+		}
+	}
+
+	if (Shot.Mode == 4 && TourTimer < 0.5f)
+	{
+		if (APawn* Pawn = PC->GetPawn())
+		{
+			Pawn->TeleportTo(FVector(Shot.Target.X, Shot.Target.Y, FuyuTerrain::Height(Shot.Target.X, Shot.Target.Y) + 100.0f), Pawn->GetActorRotation(), false, true);
 		}
 	}
 

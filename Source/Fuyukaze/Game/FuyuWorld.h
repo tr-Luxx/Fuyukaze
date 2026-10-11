@@ -93,6 +93,23 @@ protected:
 	 */
 	bool PlaceScannedTrees(FuyuProps::EProp Species, const TArray<FTransform>& Transforms);
 
+	/** Instances a Megaplant (path under Content/Megaplant_Library, without the variant letter). Returns null if it is not imported */
+	UInstancedSkinnedMeshComponent* PlaceMegaplant(const TCHAR* Folder, const TArray<FTransform>& Transforms, const FLinearColor* LeafTint);
+
+	/** Scatters a stand of one Megaplant about a point, e.g. a bamboo grove */
+	void PlaceGrove(const TCHAR* Folder, const FVector2D& Center, float Radius, int32 Count, float MinScale, float MaxScale, const FLinearColor* LeafTint, int32 Seed);
+
+	/** Mist, bird flocks and groves that are not tied to one site */
+	void BuildScenery();
+	void BuildMemorial(const FFuyuSite& Site);
+
+	/** Lays a soft horizontal sheet of mist, Size across */
+	void AddMist(const FVector& Location, float Size, float Yaw);
+
+	/** Sets a flock wheeling about a point. Heights are above Center */
+	void AddFlock(const FVector& Center, float Radius, float HeightMin, float HeightMax, int32 Count, float Speed, float Scale, const FLinearColor& Color);
+	void UpdateBirds(float DeltaSeconds);
+
 	void UpdateGrass(const FVector& ViewLocation, bool bBuildEverything);
 	void BuildGrassCell(struct FFuyuGrassCell& Cell, bool bNear);
 	void ReleaseGrassCell(struct FFuyuGrassCell& Cell);
@@ -229,6 +246,33 @@ protected:
 
 	void InitPool(FParticlePool& Pool, UInstancedStaticMeshComponent*& Component, FuyuProps::EProp Prop, int32 Count);
 	int32 Emit(FParticlePool& Pool, UInstancedStaticMeshComponent* Component, const FParticle& Particle, const FLinearColor& Color);
+
+	/** Shared material parameters. Carries the samurai's position so grass and flowers can part around her */
+	UPROPERTY(Transient)
+	TObjectPtr<class UMaterialParameterCollection> SharedParameters;
+
+	/** How far from the samurai's feet grass is pushed aside */
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Grass", meta = (Units = "cm"))
+	float GrassPartRadius = 135.0f;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInstancedStaticMeshComponent> Birds;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UStaticMeshComponent>> MistSheets;
+
+	struct FFlock
+	{
+		FVector Center = FVector::ZeroVector;
+		float Radius = 1000.0f;
+		float HeightMin = 0.0f;
+		float HeightMax = 0.0f;
+		int32 First = 0;
+		int32 Count = 0;
+		float Speed = 1000.0f;
+		float Scale = 1.0f;
+	};
+	TArray<FFlock> Flocks;
 
 	UPROPERTY(Transient)
 	TObjectPtr<UInstancedStaticMeshComponent> SparkMesh;

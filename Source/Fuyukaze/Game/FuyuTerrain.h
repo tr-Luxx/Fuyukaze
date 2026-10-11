@@ -8,7 +8,10 @@ enum class EFuyuSiteType : uint8
 	Start,
 	Camp,
 	Shrine,
-	Lookout
+	Lookout,
+
+	/** A quiet field of stone markers. Flowers grow right through it */
+	Memorial
 };
 
 struct FFuyuSite
@@ -69,6 +72,12 @@ namespace FuyuTerrain
 
 	/** 0 = plain grass, 1 = flower meadow */
 	float FlowerMask(float X, float Y);
+
+	/**
+	 *  How thickly flowers carpet the ground here (0 to 1) and what colour they are.
+	 *  Named fields have their own colours; elsewhere scattered meadows bloom white and yellow
+	 */
+	float Flowers(float X, float Y, FLinearColor& OutColor);
 
 	/** How much grass grows here, 0 on rock, sand, snow and inside sites */
 	float GrassDensity(float X, float Y, float H, float NormalZ);

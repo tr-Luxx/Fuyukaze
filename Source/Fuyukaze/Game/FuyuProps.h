@@ -18,6 +18,9 @@ struct FFuyuMaterials
 	UMaterialInterface* Water = nullptr;
 	UMaterialInterface* Streak = nullptr;
 	UMaterialInterface* Slash = nullptr;
+	UMaterialInterface* Flower = nullptr;
+	UMaterialInterface* Bird = nullptr;
+	UMaterialInterface* Mist = nullptr;
 
 	void Load();
 	static const FFuyuMaterials& Get();
@@ -55,6 +58,11 @@ namespace FuyuProps
 		Leaf,
 		SlashArc,
 		Spark,
+		FlowerCarpet,
+		GravePillar,
+		PathSlab,
+		Pagoda,
+		Bird,
 		Count
 	};
 
