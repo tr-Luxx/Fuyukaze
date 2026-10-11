@@ -11,6 +11,10 @@
 #include "Kismet/GameplayStatics.h"
 #include "Engine/Font.h"
 #include "Fonts/SlateFontInfo.h"
+#include "Fonts/FontMeasure.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Rendering/SlateRenderer.h"
+#include "Camera/PlayerCameraManager.h"
 
 namespace
 {
@@ -54,6 +58,51 @@ void AFuyuHUD::Diamond(float X, float Y, float Radius, const FLinearColor& Color
 	FCanvasNGonItem Item(FVector2D(X, Y), FVector2D(Radius, Radius), 4, Color);
 	Item.BlendMode = SE_BLEND_Translucent;
 	Canvas->DrawItem(Item);
+}
+
+void AFuyuHUD::TextRight(const FString& String, float X, float Y, float Size, const FLinearColor& Color, const TCHAR* Typeface)
+{
+	if (!HudFont)
+	{
+		HudFont = LoadObject<UFont>(nullptr, TEXT("/Engine/EngineFonts/Roboto.Roboto"));
+	}
+
+	float Width = String.Len() * Size * Scale * 0.72f;
+	if (FSlateApplication::IsInitialized())
+	{
+		const FSlateFontInfo Font(HudFont, FMath::Max(Size * Scale, 6.0f), FName(Typeface));
+		Width = FSlateApplication::Get().GetRenderer()->GetFontMeasureService()->Measure(String, Font).X;
+	}
+	Text(String, X - Width, Y, Size, Color, false, Typeface);
+}
+
+void AFuyuHUD::Disc(float X, float Y, float Radius, const FLinearColor& Color)
+{
+	FCanvasNGonItem Item(FVector2D(X, Y), FVector2D(Radius, Radius), 40, Color);
+	Item.BlendMode = SE_BLEND_Translucent;
+	Canvas->DrawItem(Item);
+}
+
+void AFuyuHUD::Line(float X0, float Y0, float X1, float Y1, float Thickness, const FLinearColor& Color)
+{
+	FCanvasLineItem Item(FVector2D(X0, Y0), FVector2D(X1, Y1));
+	Item.SetColor(Color);
+	Item.LineThickness = Thickness;
+	Item.BlendMode = SE_BLEND_Translucent;
+	Canvas->DrawItem(Item);
+}
+
+void AFuyuHUD::Slot(float X, float Y, float Radius, const TCHAR* Name, const TCHAR* Key, const FLinearColor& Accent, bool bActive, float Fill, bool bKeyAbove)
+{
+	const float S = Scale;
+	Diamond(X, Y, Radius, bActive ? Fade(Accent, 0.9f) : Fade(Paper, 0.35f));
+	Diamond(X, Y, Radius - 2.0f * S, FLinearColor(0.03f, 0.04f, 0.06f, 0.82f));
+	if (Fill > 0.0f)
+	{
+		Diamond(X, Y, (Radius - 4.0f * S) * FMath::Clamp(Fill, 0.0f, 1.0f), Fade(Accent, Fill >= 1.0f ? 0.85f : 0.45f));
+	}
+	Text(Name, X, Y - 9.0f * S, 9.0f, bActive ? Accent : Fade(Paper, 0.9f), true, TEXT("Bold"), 60);
+	Text(Key, X, bKeyAbove ? Y - Radius - 12.0f * S : Y + Radius - 9.0f * S, 13.0f, Paper, true, TEXT("Bold"));
 }
 
 void AFuyuHUD::Popup(const UObject* WorldContext, const FVector& Location, const FString& String, const FLinearColor& Color, float Size)
@@ -111,15 +160,89 @@ void AFuyuHUD::DrawHUD()
 		}
 
 		// objective
-		Diamond(66.0f * S, 70.0f * S, 7.0f * S, Gold);
+		// sits under the compass in the top left corner
+		Diamond(34.0f * S, 262.0f * S, 7.0f * S, Gold);
 		FString Objective = GameMode->GetObjectiveText().ToString();
 		if (Samurai)
 		{
 			const float Metres = FVector::Dist2D(GameMode->GetObjectiveLocation(), Samurai->GetActorLocation()) / 100.0f;
 			Objective += FString::Printf(TEXT("   %d m"), FMath::RoundToInt32(Metres));
 		}
-		Text(Objective, 88.0f * S, 56.0f * S, 18.0f, Paper);
-		Text(TEXT("G  follow the wind"), 88.0f * S, 84.0f * S, 13.0f, Fade(Paper, 0.6f));
+		Text(Objective, 54.0f * S, 248.0f * S, 17.0f, Paper);
+	}
+
+	// --- compass -------------------------------------------------------------------------------
+	// a round map in the corner that turns with the camera: foes in red, friends in green, the objective in gold
+	if (Samurai)
+	{
+		const float CX = 122.0f * S, CY = 122.0f * S, R = 100.0f * S;
+		const float Range = 6000.0f;
+		const float CamYaw = FMath::DegreesToRadians(PlayerOwner->PlayerCameraManager ? PlayerOwner->PlayerCameraManager->GetCameraRotation().Yaw : PlayerOwner->GetControlRotation().Yaw);
+		const FVector2D Fwd(FMath::Cos(CamYaw), FMath::Sin(CamYaw));
+		const FVector Here = Samurai->GetActorLocation();
+
+		// where a world offset lands on the map, with the camera's forward at the top
+		auto OnMap = [&](const FVector2D& Offset, bool bClamp, bool& bInside)
+		{
+			FVector2D P(Offset.X * -Fwd.Y + Offset.Y * Fwd.X, -(Offset.X * Fwd.X + Offset.Y * Fwd.Y));
+			P *= R / Range;
+			const float Len = P.Size();
+			bInside = Len <= R * 0.94f;
+			if (!bInside && bClamp)
+			{
+				P *= R * 0.94f / Len;
+			}
+			return FVector2D(CX, CY) + P;
+		};
+
+		Disc(CX, CY, R, FLinearColor(0.02f, 0.03f, 0.05f, 0.4f));
+		const FLinearColor Rim(0.85f, 0.42f, 0.4f, 0.75f);
+		for (int32 i = 0; i < 48; ++i)
+		{
+			const float A0 = i * UE_TWO_PI / 48.0f, A1 = (i + 1) * UE_TWO_PI / 48.0f;
+			Line(CX + FMath::Cos(A0) * R, CY + FMath::Sin(A0) * R, CX + FMath::Cos(A1) * R, CY + FMath::Sin(A1) * R, 1.5f * S, Rim);
+		}
+
+		bool bInside = false;
+		const FVector2D North = OnMap(FVector2D(Range * 2.0f, 0.0f), true, bInside);
+		Text(TEXT("N"), North.X, North.Y - 9.0f * S, 11.0f, Fade(Paper, 0.8f), true, TEXT("Bold"));
+
+		for (TActorIterator<AFuyuEnemy> It(GetWorld()); It; ++It)
+		{
+			if (!It->IsDead())
+			{
+				const FVector2D P = OnMap(FVector2D(It->GetActorLocation() - Here), false, bInside);
+				if (bInside)
+				{
+					Disc(P.X, P.Y, 3.5f * S, It->IsAggressive() ? Blood : Fade(Blood, 0.55f));
+				}
+			}
+		}
+		for (TActorIterator<AFuyuSamurai> It(GetWorld()); It; ++It)
+		{
+			if (*It != Samurai && !It->IsDead())
+			{
+				const FVector2D P = OnMap(FVector2D(It->GetActorLocation() - Here), true, bInside);
+				Disc(P.X, P.Y, 4.0f * S, FLinearColor(0.35f, 0.8f, 0.4f, 1.0f));
+			}
+		}
+		if (GameMode)
+		{
+			const FVector2D P = OnMap(FVector2D(GameMode->GetObjectiveLocation() - Here), true, bInside);
+			Diamond(P.X, P.Y, 6.0f * S, Gold);
+		}
+
+		// the samurai is an arrowhead at the centre, pointing the way she faces
+		const float Face = FMath::DegreesToRadians(Samurai->GetActorRotation().Yaw) - CamYaw;
+		const FVector2D Dir(FMath::Sin(Face), -FMath::Cos(Face)), Side(-Dir.Y, Dir.X);
+		const FVector2D Tip = FVector2D(CX, CY) + Dir * 11.0f * S, Tail = FVector2D(CX, CY) - Dir * 7.0f * S;
+		const FVector2D L = Tail - Side * 7.0f * S, Rt = Tail + Side * 7.0f * S, Notch = FVector2D(CX, CY) - Dir * 3.0f * S;
+		Line(Tip.X, Tip.Y, L.X, L.Y, 2.5f * S, Paper);
+		Line(Tip.X, Tip.Y, Rt.X, Rt.Y, 2.5f * S, Paper);
+		Line(L.X, L.Y, Notch.X, Notch.Y, 2.5f * S, Paper);
+		Line(Rt.X, Rt.Y, Notch.X, Notch.Y, 2.5f * S, Paper);
+
+		Text(TEXT("Esc  pause"), W - 150.0f * S, 40.0f * S, 13.0f, Fade(Paper, 0.6f));
 	}
 
 	if (!Samurai)
@@ -128,64 +251,83 @@ void AFuyuHUD::DrawHUD()
 	}
 
 	// --- vitals --------------------------------------------------------------------------------
+	// health sits low in the middle of the screen with the ultimate's charge as a slimmer bar beneath it
+	const float Charge = FMath::Clamp(Samurai->GetResolve() / FMath::Max((float)Samurai->GetMaxResolve(), 1.0f), 0.0f, 1.0f);
+	const bool bUltReady = Samurai->IsUltimateReady();
+	const float UltPulse = bUltReady ? 0.7f + 0.3f * FMath::Sin(GetWorld()->GetRealTimeSeconds() * 6.0f) : 1.0f;
+	const FLinearColor Cold(0.62f, 0.88f, 1.0f, 1.0f);
 	{
-		const float X = 60.0f * S, Y = H - 104.0f * S;
-		const float BarW = 380.0f * S, BarH = 12.0f * S;
+		const float BarW = 300.0f * S, BarH = 9.0f * S;
+		const float X = W * 0.5f - BarW * 0.5f, Y = H - 84.0f * S;
 		const float Health = Samurai->GetHealthFraction();
 
 		TrailingHealth = Health > TrailingHealth ? Health : FMath::FInterpConstantTo(TrailingHealth, Health, GetWorld()->GetDeltaSeconds(), 0.35f);
 
 		Rect(X - 2.0f * S, Y - 2.0f * S, BarW + 4.0f * S, BarH + 4.0f * S, Ink);
 		Rect(X, Y, BarW * TrailingHealth, BarH, Fade(Paper, 0.75f));
-		Rect(X, Y, BarW * Health, BarH, Blood);
-
-		// resolve: one diamond per point, the next one filling as it is earned
-		for (int32 i = 0; i < Samurai->GetMaxResolve(); ++i)
+		Rect(X, Y, BarW * Health, BarH, Fade(Paper, 0.92f));
+		if (Health < 0.3f)
 		{
-			const float Fill = FMath::Clamp(Samurai->GetResolve() - i, 0.0f, 1.0f);
-			const float CX = X + 12.0f * S + i * 30.0f * S, CY = Y - 22.0f * S;
-			Diamond(CX, CY, 11.0f * S, Ink);
-			Diamond(CX, CY, 8.5f * S * FMath::Max(Fill, 0.0f), Fill >= 1.0f ? Gold : Fade(Gold, 0.55f));
+			Rect(X, Y, BarW * Health, BarH, Blood);
 		}
-		Text(TEXT("F  heal"), X + 14.0f * S + Samurai->GetMaxResolve() * 30.0f * S, Y - 32.0f * S, 13.0f, Fade(Paper, 0.6f));
 
-		// the ultimate is charged by the same resolve meter, so show it as its own labelled bar
+		const float UW = 180.0f * S, UH = 5.0f * S, UX = W * 0.5f - UW * 0.5f, UY = Y + 18.0f * S;
+		Rect(UX - 2.0f * S, UY - 2.0f * S, UW + 4.0f * S, UH + 4.0f * S, Ink);
+		Rect(UX, UY, UW * Charge, UH, bUltReady ? Fade(FLinearColor::White, UltPulse) : Fade(Cold, 0.85f));
+		for (int32 i = 1; i < Samurai->GetMaxResolve(); ++i)
 		{
-			const float Charge = FMath::Clamp(Samurai->GetResolve() / FMath::Max((float)Samurai->GetMaxResolve(), 1.0f), 0.0f, 1.0f);
-			const bool bReady = Samurai->IsUltimateReady();
-			const float Pulse = bReady ? 0.7f + 0.3f * FMath::Sin(GetWorld()->GetRealTimeSeconds() * 6.0f) : 1.0f;
-			const FLinearColor Cold(0.62f, 0.88f, 1.0f, 1.0f);
-			const float UY = Y - 58.0f * S, UH = 7.0f * S;
-
-			Rect(X - 2.0f * S, UY - 2.0f * S, BarW + 4.0f * S, UH + 4.0f * S, Ink);
-			Rect(X, UY, BarW, UH, Fade(Paper, 0.12f));
-			Rect(X, UY, BarW * Charge, UH, bReady ? Fade(FLinearColor::White, Pulse) : Fade(Cold, 0.8f));
-			for (int32 i = 1; i < Samurai->GetMaxResolve(); ++i)
-			{
-				Rect(X + BarW * i / (float)Samurai->GetMaxResolve() - 1.0f * S, UY, 2.0f * S, UH, Ink);
-			}
-
-			Text(TEXT("WINTER WIND"), X, UY - 22.0f * S, 13.0f, bReady ? Fade(Cold, Pulse) : Fade(Paper, 0.65f), false, TEXT("Bold"), 160);
-			const FString Status = bReady ? FString(TEXT("READY   press R")) : FString::Printf(TEXT("%d%%"), FMath::FloorToInt32(Charge * 100.0f));
-			Text(Status, X + BarW - (bReady ? 138.0f : 40.0f) * S, UY - 22.0f * S, 13.0f, bReady ? Fade(Cold, Pulse) : Fade(Paper, 0.65f), false, bReady ? TEXT("Bold") : TEXT("Regular"), 160);
+			Rect(UX + UW * i / (float)Samurai->GetMaxResolve() - 1.0f * S, UY, 2.0f * S, UH, Ink);
 		}
-		// stance wheel
+		const FString Status = bUltReady ? FString(TEXT("WINTER WIND READY  -  R")) : FString::Printf(TEXT("winter wind  %d%%"), FMath::FloorToInt32(Charge * 100.0f));
+		Text(Status, W * 0.5f, UY + 10.0f * S, 11.0f, bUltReady ? Fade(Cold, UltPulse) : Fade(Paper, 0.55f), true, bUltReady ? TEXT("Bold") : TEXT("Regular"), 120);
+	}
+
+	// --- action slots --------------------------------------------------------------------------
+	// diamonds in the bottom right, each showing its key: the healing draught, the sword's moves, and the stances above
+	{
+		const float R = 36.0f * S, Step = 40.0f * S;
+		const float BX = W - 300.0f * S, BY = H - 118.0f * S;
+
+		Slot(BX - 270.0f * S, BY + 14.0f * S, R, TEXT("HEAL"), TEXT("F"), Gold, Samurai->GetResolve() >= 1.0f);
+		Text(FString::FromInt(FMath::FloorToInt32(Samurai->GetResolve())), BX - 240.0f * S, BY + 22.0f * S, 13.0f, Paper, true, TEXT("Bold"));
+
+		Slot(BX - 3.0f * Step, BY + Step * 0.5f, R, TEXT("GUARD"), TEXT("Q"), Gold, Samurai->IsBlocking());
+		Slot(BX - 2.0f * Step, BY - Step * 0.5f, R, TEXT("CUT"), TEXT("LMB"), Gold, false, 0.0f, true);
+		Slot(BX - 1.0f * Step, BY + Step * 0.5f, R, TEXT("HEAVY"), TEXT("RMB"), Gold);
+		Slot(BX, BY - Step * 0.5f, R, TEXT("WIND"), TEXT("R"), bUltReady ? Fade(FLinearColor::White, UltPulse) : Cold, bUltReady, Charge, true);
+		Slot(BX + 1.0f * Step, BY + Step * 0.5f, R, TEXT("DODGE"), TEXT("Alt"), Gold);
+
+		// stances fan out above, the one in use lit
 		const EFuyuStance Stances[] = { EFuyuStance::Stone, EFuyuStance::Wind, EFuyuStance::Moon };
 		const TCHAR* Foes[] = { TEXT("swords"), TEXT("spears"), TEXT("brutes") };
-		float SX = X;
+		const TCHAR* Keys[] = { TEXT("1"), TEXT("2"), TEXT("3") };
+		const float SX = W - 178.0f * S, SY = H - 300.0f * S;
+		const FVector2D Spots[] = { FVector2D(SX - 58.0f * S, SY), FVector2D(SX, SY - 58.0f * S), FVector2D(SX + 58.0f * S, SY) };
 		for (int32 i = 0; i < 3; ++i)
 		{
 			const bool bActive = Samurai->GetStance() == Stances[i];
-			const FString Label = FString::Printf(TEXT("%d  %s"), i + 1, FuyuCombat::StanceName(Stances[i]));
-			Text(Label, SX, Y + 24.0f * S, 15.0f, bActive ? Gold : Fade(Paper, 0.45f), false, bActive ? TEXT("Bold") : TEXT("Regular"), 120);
+			Slot(Spots[i].X, Spots[i].Y, 32.0f * S, *FString(FuyuCombat::StanceName(Stances[i])).ToUpper(), Keys[i], Gold, bActive);
 			if (bActive)
 			{
-				Text(FString::Printf(TEXT("breaks %s"), Foes[i]), SX, Y + 46.0f * S, 12.0f, Fade(Paper, 0.6f));
+				Text(FString::Printf(TEXT("breaks %s"), Foes[i]), SX, SY + 44.0f * S, 12.0f, Fade(Paper, 0.7f), true);
 			}
-			SX += 128.0f * S;
+		}
+
+		// the moves without a slot are listed down the right edge, key last
+		const TCHAR* Hints[][2] = {
+			{ TEXT("Heavy Cut [Hold]"), TEXT("RMB") },
+			{ TEXT("Lock On"), TEXT("Tab") },
+			{ TEXT("Guiding Wind"), TEXT("G") },
+			{ TEXT("Sprint"), TEXT("Shift") },
+		};
+		float HY = H * 0.43f;
+		for (const auto& Hint : Hints)
+		{
+			TextRight(Hint[0], W - 84.0f * S, HY, 14.0f, Fade(Paper, 0.75f));
+			Text(Hint[1], W - 68.0f * S, HY, 14.0f, Paper, false, TEXT("Italic"));
+			HY += 30.0f * S;
 		}
 	}
-
 	// --- enemies -------------------------------------------------------------------------------
 	const AFuyuEnemy* Locked = Samurai->GetLockTarget();
 
@@ -225,16 +367,17 @@ void AFuyuHUD::DrawHUD()
 		}
 
 		// the locked target gets a named bar at the top of the screen, as a duel deserves
-		const float BW = 520.0f * S, BX = W * 0.5f - BW * 0.5f, BY = 110.0f * S;
+		const float BW = 520.0f * S, BX = W * 0.5f - BW * 0.5f, BY = 50.0f * S;
 		Text(Locked->GetDisplayName().ToString(), W * 0.5f, BY - 34.0f * S, 18.0f, Paper, true, TEXT("Regular"), 160);
 		Rect(BX - 2.0f * S, BY - 2.0f * S, BW + 4.0f * S, 14.0f * S, Ink);
 		Rect(BX, BY, BW * Locked->GetHealthFraction(), 10.0f * S, Blood);
-		Rect(W * 0.5f - BW * 0.35f * Locked->GetPostureFraction(), BY + 16.0f * S, BW * 0.7f * Locked->GetPostureFraction(), 4.0f * S, Gold);
+		Rect(BX - 2.0f * S, BY + 13.0f * S, BW + 4.0f * S, 8.0f * S, Ink);
+		Rect(BX, BY + 14.0f * S, BW * Locked->GetPostureFraction(), 5.0f * S, FLinearColor(0.55f, 0.8f, 0.95f, 1.0f));
 
 		const EFuyuStance Counter = FuyuCombat::CounterStance(Locked->GetEnemyType());
 		if (Counter != Samurai->GetStance())
 		{
-			Text(FString::Printf(TEXT("%s stance breaks this guard"), FuyuCombat::StanceName(Counter)), W * 0.5f, BY + 28.0f * S, 13.0f, Fade(Gold, 0.85f), true);
+			Text(FString::Printf(TEXT("%s stance breaks this guard"), FuyuCombat::StanceName(Counter)), W * 0.5f, BY + 26.0f * S, 13.0f, Fade(Gold, 0.85f), true);
 		}
 	}
 
@@ -262,7 +405,7 @@ void AFuyuHUD::DrawHUD()
 	// a duel puts the opponent's name and health at the top of the screen
 	if (const AFuyuSamurai* Rival = Samurai->GetDuelOpponent())
 	{
-		const float BW = 520.0f * S, BX = W * 0.5f - BW * 0.5f, BY = 172.0f * S;
+		const float BW = 520.0f * S, BX = W * 0.5f - BW * 0.5f, BY = 128.0f * S;
 		Text(FString::Printf(TEXT("DUEL  -  %s"), *Rival->GetPlayerLabel().ToUpper()), W * 0.5f, BY - 34.0f * S, 18.0f, Gold, true, TEXT("Regular"), 200);
 		Rect(BX - 2.0f * S, BY - 2.0f * S, BW + 4.0f * S, 14.0f * S, Ink);
 		Rect(BX, BY, BW * Rival->GetHealthFraction(), 10.0f * S, Blood);
@@ -317,7 +460,7 @@ void AFuyuHUD::DrawHUD()
 		const float Thump = 1.0f + 0.55f * FMath::Square(FMath::Max(1.0f - SinceHit / 0.16f, 0.0f));
 		const FLinearColor Color = Chain >= 10 ? FLinearColor(1.0f, 0.32f, 0.12f) : (Chain >= 5 ? Gold : Paper);
 		const float Alpha = FMath::Min(1.0f, Left * 3.0f);
-		const float X = W - 190.0f * S, Y = H * 0.36f;
+		const float X = W - 190.0f * S, Y = H * 0.17f;
 
 		Text(FString::FromInt(Chain), X, Y - 30.0f * S * (Thump - 1.0f), 64.0f * Thump, Fade(Color, Alpha), true, TEXT("Bold"));
 		Text(TEXT("HITS"), X, Y + 98.0f * S, 16.0f, Fade(Color, Alpha * 0.9f), true, TEXT("Regular"), 500);
@@ -388,8 +531,8 @@ void AFuyuHUD::DrawHUD()
 			{ TEXT("R"),    TEXT("ultimate"),      TEXT("Esc"),   TEXT("pause") },
 		};
 
-		const float X = W - 470.0f * S;
-		float Y = H - 220.0f * S;
+		const float X = 60.0f * S;
+		float Y = H * 0.5f - 70.0f * S;
 		Rect(X - 18.0f * S, Y - 14.0f * S, 448.0f * S, 196.0f * S, FLinearColor(0.0f, 0.0f, 0.0f, 0.35f));
 		for (const auto& Line : Lines)
 		{
@@ -400,11 +543,11 @@ void AFuyuHUD::DrawHUD()
 			Y += 24.0f * S;
 		}
 
-		Text(TEXT("F1  hide"), W - 104.0f * S, H - 246.0f * S, 11.0f, Fade(Paper, 0.45f));
+		Text(TEXT("F1  hide"), X + 366.0f * S, Y + 6.0f * S, 11.0f, Fade(Paper, 0.45f));
 	}
 	else
 	{
-		Text(TEXT("F1  controls"), W - 150.0f * S, H - 50.0f * S, 12.0f, Fade(Paper, 0.4f));
+		Text(TEXT("F1  controls"), 40.0f * S, H - 50.0f * S, 12.0f, Fade(Paper, 0.5f));
 	}
 
 	// --- ultimate ------------------------------------------------------------------------------
