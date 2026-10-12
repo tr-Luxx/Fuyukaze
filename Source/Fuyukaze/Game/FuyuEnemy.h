@@ -69,6 +69,9 @@ public:
 	float GetPostureFraction() const { return MaxPosture > 0.0f ? FMath::Clamp(Posture / MaxPosture, 0.0f, 1.0f) : 0.0f; }
 	FText GetDisplayName() const;
 
+	/** Stops this enemy dead for a while, as if time had left it behind. Used by the samurai's ultimate */
+	void Freeze(float Seconds);
+
 	/** Damage dealt by the most recent blow that got through, for the attacker's feedback */
 	float GetLastDamageTaken() const { return LastDamageTaken; }
 
@@ -134,7 +137,10 @@ protected:
 	UPROPERTY(Transient)
 	TObjectPtr<UNiagaraSystem> ImpactFX;
 
+	UPROPERTY(ReplicatedUsing = OnRep_Type)
 	EFuyuEnemyType Type = EFuyuEnemyType::Ronin;
+
+	UPROPERTY(ReplicatedUsing = OnRep_State)
 	EFuyuEnemyState State = EFuyuEnemyState::Idle;
 	FName SiteId;
 	FVector Home = FVector::ZeroVector;
@@ -145,6 +151,7 @@ protected:
 
 	float StateTime = 0.0f;
 	float MaxPosture = 60.0f;
+	UPROPERTY(Replicated)
 	float Posture = 0.0f;
 	float LastPostureHitTime = -100.0f;
 
@@ -165,6 +172,7 @@ protected:
 	float CircleSign = 1.0f;
 	float NextCircleFlip = 0.0f;
 	bool bHasToken = false;
+	UPROPERTY(Replicated)
 	bool bUnblockableAttack = false;
 	bool bHeavyAttack = false;
 	bool bHitThisSwing = false;
@@ -182,6 +190,43 @@ protected:
 
 	/** Freezes this enemy for a few frames and flashes it white */
 	void Impact(float FreezeSeconds);
+
+	// --- multiplayer -----------------------------------------------------------------------------
+	// Enemies think on the host only. Other machines are sent their state, and cues for what to show.
+
+public:
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+protected:
+
+	/** The living player nearest this enemy */
+	AFuyuSamurai* FindPrey() const;
+
+	/** What a joined player's machine does each frame in place of the state machine */
+	void ClientTick(float DeltaSeconds);
+
+	/** Sends a cue to the other machines, if there are any */
+	void Cue(uint8 Kind, const FVector& Location = FVector::ZeroVector);
+
+	UFUNCTION()
+	void OnRep_Type();
+
+	UFUNCTION()
+	void OnRep_State();
+
+	/** 0 white glint, 1 red glint, 2 light flinch, 3 heavy flinch, 4 light impact, 5 heavy impact, 6 guard */
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastCue(uint8 Kind, FVector Location);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastAttack(bool bHeavy, uint8 Count, float Rate);
+
+	UPROPERTY(Replicated)
+	float RepHP = 60.0f;
+
+	float ShownHP = -1.0f;
+	bool bClientDead = false;
 
 	/** Enemies currently holding permission to attack */
 	static TArray<TWeakObjectPtr<AFuyuEnemy>> AttackTokens;

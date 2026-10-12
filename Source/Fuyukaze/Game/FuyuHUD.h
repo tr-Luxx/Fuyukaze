@@ -29,13 +29,21 @@ protected:
 	void Rect(float X, float Y, float W, float H, const FLinearColor& Color);
 	void Diamond(float X, float Y, float Radius, const FLinearColor& Color);
 
+	/** Text that ends at X instead of starting there */
+	void TextRight(const FString& String, float X, float Y, float Size, const FLinearColor& Color, const TCHAR* Typeface = TEXT("Regular"));
+	void Disc(float X, float Y, float Radius, const FLinearColor& Color);
+	void Line(float X0, float Y0, float X1, float Y1, float Thickness, const FLinearColor& Color);
+
+	/** One diamond-shaped action slot: a short name inside and its key at the bottom tip, or the top one for slots with others below. Fill of 0 to 1 pours a colour into it. */
+	void Slot(float X, float Y, float Radius, const TCHAR* Name, const TCHAR* Key, const FLinearColor& Accent, bool bActive = false, float Fill = 0.0f, bool bKeyAbove = false);
+
 	UPROPERTY(Transient)
 	TObjectPtr<UFont> HudFont;
 
 	/** Pixels per 1080p pixel, so the layout holds at any resolution */
 	float Scale = 1.0f;
 
-	bool bShowControls = true;
+	bool bShowControls = false;
 	bool bHelpKeyWasDown = false;
 
 	/** Health shown a moment ago, so lost health drains visibly instead of vanishing */

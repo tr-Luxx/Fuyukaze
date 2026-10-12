@@ -19,6 +19,10 @@
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Materials/MaterialParameterCollection.h"
+#include "Kismet/KismetMaterialLibrary.h"
+#include "GameFramework/Character.h"
+#include "Components/CapsuleComponent.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Async/ParallelFor.h"
 #include "Engine/Engine.h"
@@ -61,11 +65,23 @@ AFuyuWorld::AFuyuWorld()
 	Sun->Intensity = 8.5f;
 	Sun->LightColor = FColor(255, 238, 214);
 	Sun->bAtmosphereSunLight = true;
+	Sun->ForwardShadingPriority = 1;
 	Sun->bEnableLightShaftBloom = true;
 	Sun->BloomScale = 0.12f;
 	Sun->BloomThreshold = 0.05f;
 	Sun->VolumetricScatteringIntensity = 1.6f;
 	Sun->SetRelativeRotation(FRotator(-24.0f, 52.0f, 0.0f));
+
+	// moonlight is plain cold light: it does not light the air, or the night sky would turn as blue as the day's
+	Moon = CreateDefaultSubobject<UDirectionalLightComponent>(TEXT("Moon"));
+	Moon->SetupAttachment(Root);
+	Moon->SetMobility(EComponentMobility::Movable);
+	Moon->Intensity = 0.0f;
+	Moon->LightColor = FColor(150, 182, 255);
+	Moon->bAtmosphereSunLight = false;
+	Moon->VolumetricScatteringIntensity = 1.2f;
+	Moon->SetRelativeRotation(FRotator(-40.0f, 200.0f, 0.0f));
+	Moon->SetVisibility(false);
 
 	SkyLight = CreateDefaultSubobject<USkyLightComponent>(TEXT("SkyLight"));
 	SkyLight->SetupAttachment(Root);
@@ -81,10 +97,18 @@ AFuyuWorld::AFuyuWorld()
 	Atmosphere->SetupAttachment(Root);
 	Atmosphere->MieScatteringScale = 0.012f;
 
+	// distant hills fade into blue haze sooner, which is most of what gives the island its sense of depth
+	Atmosphere->AerialPespectiveViewDistanceScale = 2.4f;
+
 	Fog = CreateDefaultSubobject<UExponentialHeightFogComponent>(TEXT("Fog"));
 	Fog->SetupAttachment(Root);
 	Fog->SetRelativeLocation(FVector(0, 0, 300));
-	Fog->FogDensity = 0.011f;
+	Fog->FogDensity = 0.014f;
+
+	// a second, shallow layer of fog hugs the lowest ground: the lake shore, the coast and the valley floors
+	Fog->SecondFogData.FogDensity = 0.035f;
+	Fog->SecondFogData.FogHeightFalloff = 1.1f;
+	Fog->SecondFogData.FogHeightOffset = 500.0f;
 	Fog->FogHeightFalloff = 0.045f;
 	Fog->FogMaxOpacity = 0.92f;
 	Fog->StartDistance = 1200.0f;
@@ -140,7 +164,7 @@ void AFuyuWorld::BeginPlay()
 	const double StartTime = FPlatformTime::Seconds();
 
 	WindDirection = FRotator(0, WindHeading, 0).RotateVector(FVector::ForwardVector);
-	Sun->SetWorldRotation(FRotator(-SunElevation, SunHeading, 0.0f));
+	BuildSky();
 	Water->SetMaterial(0, FFuyuMaterials::Get().Water);
 
 	// scanned grass from Fab, if it has been imported: straw-coloured dry grass, then green wild grass
@@ -160,9 +184,13 @@ void AFuyuWorld::BeginPlay()
 		}
 	}
 
+	SharedParameters = LoadObject<UMaterialParameterCollection>(nullptr, TEXT("/Game/Fuyukaze/Materials/MPC_Fuyu.MPC_Fuyu"), nullptr, LOAD_NoWarn);
+
 	BuildTerrain();
 	BuildScatter();
 	BuildSites();
+	BuildScenery();
+	BuildHorses();
 
 	// drifting leaves and the guiding-wind ribbons are two small pools of instances moved by hand each frame
 	Leaves = NewObject<UInstancedStaticMeshComponent>(this);
@@ -218,6 +246,21 @@ void AFuyuWorld::BeginPlay()
 		SlashState.AddDefaulted();
 	}
 
+	for (int32 i = 0; i < 12; ++i)
+	{
+		UStaticMeshComponent* Line = NewObject<UStaticMeshComponent>(this);
+		Line->SetStaticMesh(FuyuProps::Get(EProp::TrailLine));
+		Line->SetMobility(EComponentMobility::Movable);
+		Line->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Line->SetCastShadow(false);
+		Line->SetVisibility(false);
+		Line->SetupAttachment(Root);
+		Line->RegisterComponent();
+		TrailMeshes.Add(Line);
+		TrailMaterials.Add(Line->CreateDynamicMaterialInstance(0));
+		TrailState.AddDefaulted();
+	}
+
 	ApplyGrade();
 
 	const FFuyuSite* Start = FuyuTerrain::FindSite(TEXT("Start"));
@@ -245,10 +288,27 @@ void AFuyuWorld::Tick(float DeltaSeconds)
 		ViewLocation = Camera->GetCameraLocation();
 	}
 
+	UpdateSky(DeltaSeconds, ViewLocation);
 	UpdateGrass(ViewLocation, false);
 	UpdateLeaves(DeltaSeconds, ViewLocation);
 	UpdateStreaks(DeltaSeconds, ViewLocation);
 	UpdateEffects(DeltaSeconds);
+	UpdateBirds(DeltaSeconds);
+	UpdateHorses();
+
+	// tell the grass and flower materials where the samurai is standing, so blades lean away from her legs.
+	// XYZ is the point between her feet and W the radius of the effect; with no pawn it is parked far away
+	if (SharedParameters)
+	{
+		FLinearColor Feet(0.0f, 0.0f, -1000000.0f, GrassPartRadius);
+		if (const ACharacter* Player = Cast<ACharacter>(UGameplayStatics::GetPlayerPawn(this, 0)))
+		{
+			const FVector P = Player->GetActorLocation() - FVector(0, 0, Player->GetCapsuleComponent()->GetScaledCapsuleHalfHeight());
+			Feet = FLinearColor(P.X, P.Y, P.Z, GrassPartRadius);
+		}
+		UKismetMaterialLibrary::SetVectorParameterValue(this, SharedParameters, TEXT("PlayerFeet"), Feet);
+		UKismetMaterialLibrary::SetScalarParameterValue(this, SharedParameters, TEXT("GrassPartRadius"), GrassPartRadius);
+	}
 }
 
 void AFuyuWorld::InitPool(FParticlePool& Pool, UInstancedStaticMeshComponent*& Component, EProp Prop, int32 Count)
@@ -358,6 +418,32 @@ void AFuyuWorld::SpawnSlash(const FVector& Origin, const FVector& Forward, float
 	}
 }
 
+void AFuyuWorld::SpawnTrail(const FVector& A, const FVector& B, const FLinearColor& Color, float Life)
+{
+	if (TrailMeshes.Num() == 0 || FVector::DistSquared(A, B) < 1.0f)
+	{
+		return;
+	}
+
+	NextTrail = (NextTrail + 1) % TrailMeshes.Num();
+	FSlash& Trail = TrailState[NextTrail];
+	Trail.Age = 0.0f;
+	Trail.Life = Life;
+	Trail.Size = FVector::Dist(A, B) / 100.0f;
+
+	// the mesh is a metre long along X, so stretch it to span the two points and thicken it a little
+	UStaticMeshComponent* Line = TrailMeshes[NextTrail];
+	Line->SetWorldLocationAndRotation(A, (B - A).Rotation());
+	Line->SetWorldScale3D(FVector(Trail.Size, 14.0f, 14.0f));
+	Line->SetVisibility(true);
+
+	if (UMaterialInstanceDynamic* Mat = TrailMaterials[NextTrail])
+	{
+		Mat->SetVectorParameterValue(TEXT("Tint"), Color);
+		Mat->SetScalarParameterValue(TEXT("Fade"), 1.0f);
+	}
+}
+
 void AFuyuWorld::PunchScreen(float Strength)
 {
 	ScreenPunch = FMath::Max(ScreenPunch, FMath::Clamp(Strength, 0.0f, 1.0f));
@@ -449,6 +535,49 @@ void AFuyuWorld::UpdateEffects(float DeltaSeconds)
 		}
 	}
 
+	// trails burn bright, then thin and fade
+	for (int32 i = 0; i < TrailState.Num(); ++i)
+	{
+		FSlash& Trail = TrailState[i];
+		if (Trail.Age >= Trail.Life)
+		{
+			continue;
+		}
+
+		Trail.Age += DeltaSeconds;
+		const float T = FMath::Clamp(Trail.Age / Trail.Life, 0.0f, 1.0f);
+		const float Width = FMath::Lerp(22.0f, 3.0f, FMath::Sqrt(T));
+		TrailMeshes[i]->SetWorldScale3D(FVector(Trail.Size, Width, Width));
+
+		if (UMaterialInstanceDynamic* Mat = TrailMaterials[i])
+		{
+			Mat->SetScalarParameterValue(TEXT("Fade"), FMath::Square(1.0f - T) * 1.6f);
+		}
+
+		if (T >= 1.0f)
+		{
+			TrailMeshes[i]->SetVisibility(false);
+		}
+	}
+
+	// the ultimate's focus drains the colour out of the world and closes the frame in around the samurai
+	if (!FMath::IsNearlyEqual(FocusGrade, AppliedFocus, 0.002f) || FocusGrade > 0.0f)
+	{
+		AppliedFocus = FocusGrade;
+		ApplyGrade();
+
+		FPostProcessSettings& S = PostProcess->Settings;
+		const FVector4 Cold(0.1, 0.13, 0.22, 1.0);
+		S.ColorSaturation = FMath::Lerp(S.ColorSaturation, Cold, (double)FocusGrade);
+		S.ColorContrast = S.ColorContrast * (1.0 + 0.22 * FocusGrade);
+		S.VignetteIntensity += 0.2f * FocusGrade;
+		S.FilmGrainIntensity += 0.25f * FocusGrade;
+
+		// a cold cast over what colour is left, and no motion blur, so the fast camera cuts stay crisp
+		S.ColorGain = FMath::Lerp(S.ColorGain, FVector4(0.9, 1.0, 1.22, 1.0), (double)FocusGrade);
+		S.MotionBlurAmount = 0.22f * (1.0f - FocusGrade);
+	}
+
 	// the screen punch rides on top of the colour grade and decays in about a quarter of a second
 	if (ScreenPunch > 0.0f || PostProcess->Settings.SceneFringeIntensity > 0.0f)
 	{
@@ -458,7 +587,7 @@ void AFuyuWorld::UpdateEffects(float DeltaSeconds)
 		S.bOverride_SceneFringeIntensity = true;
 		S.SceneFringeIntensity = 2.2f * ScreenPunch;
 		S.BloomIntensity = 0.9f + 0.9f * ScreenPunch;
-		S.VignetteIntensity = (bCinemaMode ? 0.75f : 0.42f) + 0.35f * ScreenPunch;
+		S.VignetteIntensity = (bCinemaMode ? 0.75f : 0.42f) + 0.35f * ScreenPunch + 0.2f * FocusGrade;
 	}
 }
 
@@ -766,18 +895,9 @@ void AFuyuWorld::BuildScatter()
 	UE_LOG(LogTemp, Log, TEXT("Fuyukaze: scattered %d trees and rocks"), Total);
 }
 
-bool AFuyuWorld::PlaceScannedTrees(EProp Species, const TArray<FTransform>& Transforms)
+UInstancedSkinnedMeshComponent* AFuyuWorld::PlaceMegaplant(const TCHAR* Folder, const TArray<FTransform>& Transforms, const FLinearColor* LeafTint)
 {
-	const TCHAR* Folder = nullptr;
-	switch (Species)
-	{
-	case EProp::Ginkgo: Folder = TEXT("Tree_Ginkgo/Tree_Ginkgo_01/Tree_Ginkgo_01"); break;
-	case EProp::Maple:  Folder = TEXT("Tree_Norway_Maple/Tree_Norway_Maple_Forest_01/Tree_Norway_Maple_Forest_01"); break;
-	case EProp::Pine:   Folder = TEXT("Tree_Norway_Spruce/Tree_Norway_Spruce_01/Tree_Norway_Spruce_01"); break;
-	default: return false;
-	}
-
-	// each Megaplant ships four grown variants, A to D
+	// each Megaplant ships several grown variants, lettered from A
 	TArray<USkinnedAsset*> Variants;
 	for (const TCHAR* Letter : { TEXT("A"), TEXT("B"), TEXT("C"), TEXT("D") })
 	{
@@ -790,7 +910,7 @@ bool AFuyuWorld::PlaceScannedTrees(EProp Species, const TArray<FTransform>& Tran
 
 	if (Variants.Num() == 0)
 	{
-		return false;
+		return nullptr;
 	}
 
 	// the wind provider that ships with the vegetation plugin drives the trees' bone-based sway
@@ -805,6 +925,7 @@ bool AFuyuWorld::PlaceScannedTrees(EProp Species, const TArray<FTransform>& Tran
 		PerVariant[i % Variants.Num()].Add(T);
 	}
 
+	UInstancedSkinnedMeshComponent* First = nullptr;
 	for (int32 v = 0; v < Variants.Num(); ++v)
 	{
 		UInstancedSkinnedMeshComponent* Comp = NewObject<UInstancedSkinnedMeshComponent>(this);
@@ -819,18 +940,17 @@ bool AFuyuWorld::PlaceScannedTrees(EProp Species, const TArray<FTransform>& Tran
 		Comp->RegisterComponent();
 		Comp->SetCullDistances(FMath::RoundToInt32(ScannedTreeDrawDistance * 0.85f), FMath::RoundToInt32(ScannedTreeDrawDistance));
 
-		// the scans are of summer trees. Push the leaf tint towards autumn: gold for ginkgo, red for maple
-		if (Species != EProp::Pine)
+		// the scans are of trees in summer leaf; a tint shifts them to autumn colour or to blossom
+		if (LeafTint)
 		{
-			const FLinearColor Leaf = Species == EProp::Ginkgo ? FLinearColor(3.2f, 2.7f, 0.1f) : FLinearColor(5.5f, 0.5f, 0.2f);
 			for (int32 m = 0; m < Comp->GetNumMaterials(); ++m)
 			{
 				UMaterialInterface* Mat = Comp->GetMaterial(m);
 				if (Mat && Mat->GetName().Contains(TEXT("Foliage")))
 				{
 					UMaterialInstanceDynamic* Dyn = Comp->CreateDynamicMaterialInstance(m, Mat);
-					Dyn->SetVectorParameterValue(TEXT("BaseColor Tint Leaves"), Leaf);
-					Dyn->SetVectorParameterValue(TEXT("Translucency Tint Leaves"), Leaf);
+					Dyn->SetVectorParameterValue(TEXT("BaseColor Tint Leaves"), *LeafTint);
+					Dyn->SetVectorParameterValue(TEXT("Translucency Tint Leaves"), *LeafTint);
 				}
 			}
 		}
@@ -839,14 +959,248 @@ bool AFuyuWorld::PlaceScannedTrees(EProp Species, const TArray<FTransform>& Tran
 		AnimationIndices.Init(0, PerVariant[v].Num());
 		Comp->AddInstances(PerVariant[v], AnimationIndices, false, true);
 		ScannedTrees.Add(Comp);
-		if (v == 0)
+		First = First ? First : Comp;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("Fuyukaze: %d scanned plants placed from %s (%d variants)"), Transforms.Num(), Folder, Variants.Num());
+	return First;
+}
+
+bool AFuyuWorld::PlaceScannedTrees(EProp Species, const TArray<FTransform>& Transforms)
+{
+	// gold for ginkgo and red for maple; the spruce keeps its own green
+	const FLinearColor Gold(3.2f, 2.7f, 0.1f), Red(5.5f, 0.5f, 0.2f);
+
+	UInstancedSkinnedMeshComponent* Comp = nullptr;
+	switch (Species)
+	{
+	case EProp::Ginkgo: Comp = PlaceMegaplant(TEXT("Tree_Ginkgo/Tree_Ginkgo_01/Tree_Ginkgo_01"), Transforms, &Gold); break;
+	case EProp::Maple:  Comp = PlaceMegaplant(TEXT("Tree_Norway_Maple/Tree_Norway_Maple_Forest_01/Tree_Norway_Maple_Forest_01"), Transforms, &Red); break;
+	case EProp::Pine:   Comp = PlaceMegaplant(TEXT("Tree_Norway_Spruce/Tree_Norway_Spruce_01/Tree_Norway_Spruce_01"), Transforms, nullptr); break;
+	default: break;
+	}
+
+	if (Comp)
+	{
+		ScannedBySpecies.Add((uint8)Species, Comp);
+	}
+	return Comp != nullptr;
+}
+
+void AFuyuWorld::PlaceGrove(const TCHAR* Folder, const FVector2D& Center, float Radius, int32 Count, float MinScale, float MaxScale, const FLinearColor* LeafTint, int32 Seed)
+{
+	FRandomStream Rng(Seed);
+	TArray<FTransform> Transforms;
+
+	for (int32 i = 0; i < Count; ++i)
+	{
+		// denser towards the middle, and kept off the trails
+		const float Angle = Rng.FRandRange(0.0f, 2.0f * PI);
+		const float Dist = Radius * FMath::Sqrt(Rng.FRand()) * Rng.FRandRange(0.5f, 1.0f);
+		const float X = Center.X + FMath::Cos(Angle) * Dist, Y = Center.Y + FMath::Sin(Angle) * Dist;
+		const float Scale = Rng.FRandRange(MinScale, MaxScale);
+		const float Yaw = Rng.FRandRange(0.0f, 360.0f);
+
+		if (FuyuTerrain::PathDistance(X, Y) < 320.0f || FuyuTerrain::Height(X, Y) < 200.0f)
 		{
-			ScannedBySpecies.Add((uint8)Species, Comp);
+			continue;
+		}
+
+		Transforms.Add(FTransform(FRotator(0, Yaw, 0), FVector(X, Y, FuyuTerrain::Height(X, Y) - 15.0f), FVector(Scale)));
+	}
+
+	PlaceMegaplant(Folder, Transforms, LeafTint);
+}
+
+void AFuyuWorld::AddMist(const FVector& Location, float Size, float Yaw)
+{
+	UStaticMeshComponent* Sheet = NewObject<UStaticMeshComponent>(this);
+	Sheet->SetStaticMesh(Water->GetStaticMesh());
+	Sheet->SetMaterial(0, FFuyuMaterials::Get().Mist);
+	Sheet->SetMobility(EComponentMobility::Movable);
+	Sheet->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	Sheet->SetCastShadow(false);
+	Sheet->SetupAttachment(Root);
+	Sheet->RegisterComponent();
+	Sheet->SetWorldLocationAndRotation(Location, FRotator(0, Yaw, 0));
+	Sheet->SetWorldScale3D(FVector(Size / 100.0f, Size / 100.0f, 1.0f));
+	MistSheets.Add(Sheet);
+}
+
+void AFuyuWorld::AddFlock(const FVector& Center, float Radius, float HeightMin, float HeightMax, int32 Count, float Speed, float Scale, const FLinearColor& Color)
+{
+	if (!Birds)
+	{
+		Birds = NewObject<UInstancedStaticMeshComponent>(this);
+		Birds->SetStaticMesh(FuyuProps::Get(EProp::Bird));
+		Birds->SetMobility(EComponentMobility::Movable);
+		Birds->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Birds->SetCastShadow(false);
+		Birds->SetNumCustomDataFloats(3);
+		Birds->SetupAttachment(Root);
+		Birds->RegisterComponent();
+	}
+
+	FFlock Flock;
+	Flock.Center = Center;
+	Flock.Radius = Radius;
+	Flock.HeightMin = HeightMin;
+	Flock.HeightMax = HeightMax;
+	Flock.First = Birds->GetInstanceCount();
+	Flock.Count = Count;
+	Flock.Speed = Speed;
+	Flock.Scale = Scale;
+	Flocks.Add(Flock);
+
+	const float Data[3] = { Color.R, Color.G, Color.B };
+	for (int32 i = 0; i < Count; ++i)
+	{
+		const int32 Index = Birds->AddInstance(FTransform(Center), true);
+		Birds->SetCustomData(Index, MakeArrayView(Data, 3), false);
+	}
+}
+
+void AFuyuWorld::UpdateBirds(float DeltaSeconds)
+{
+	if (!Birds || Flocks.Num() == 0)
+	{
+		return;
+	}
+
+	const float Time = GetWorld()->GetTimeSeconds();
+	TArray<FTransform> Transforms;
+	Transforms.Reserve(Birds->GetInstanceCount());
+
+	for (const FFlock& Flock : Flocks)
+	{
+		for (int32 i = 0; i < Flock.Count; ++i)
+		{
+			// every bird wheels round the flock's centre on its own ring, at its own height and pace.
+			// These are fixed per bird, so no state needs storing: position is a pure function of time
+			FRandomStream Rng(Flock.First * 131 + i * 7 + 1);
+			const float Ring = Flock.Radius * FMath::Lerp(0.25f, 1.0f, FMath::Sqrt(Rng.FRand()));
+			const float Height = FMath::Lerp(Flock.HeightMin, Flock.HeightMax, Rng.FRand());
+			const float Phase = Rng.FRandRange(0.0f, 2.0f * PI);
+			const float Pace = Rng.FRandRange(0.75f, 1.25f);
+			const float Turn = Rng.FRand() < 0.85f ? 1.0f : -1.0f;
+
+			const float Angle = Phase + Turn * Time * Flock.Speed * Pace / Ring;
+			const float Wander = FMath::Sin(Time * 0.31f * Pace + Phase * 3.0f);
+			const FVector Offset(FMath::Cos(Angle) * Ring * (1.0f + 0.12f * Wander), FMath::Sin(Angle) * Ring * (1.0f - 0.12f * Wander), Height + 0.08f * Flock.Radius * FMath::Sin(Time * 0.5f * Pace + Phase));
+
+			// face along the direction of travel, banked into the turn
+			const FRotator Rotation(0.0f, FMath::RadiansToDegrees(Angle) + 90.0f * Turn, -22.0f * Turn);
+			Transforms.Add(FTransform(Rotation, Flock.Center + Offset, FVector(Flock.Scale * Rng.FRandRange(0.8f, 1.2f))));
 		}
 	}
 
-	UE_LOG(LogTemp, Log, TEXT("Fuyukaze: %d scanned trees placed from %s (%d variants)"), Transforms.Num(), Folder, Variants.Num());
-	return true;
+	Birds->BatchUpdateInstancesTransforms(0, Transforms, true, true, true);
+}
+
+void AFuyuWorld::BuildScenery()
+{
+	using namespace FuyuTerrain;
+
+	// --- mist ----------------------------------------------------------------------------------
+	// a sea of cloud lies against the foot of the mountain, so that it seems to float above the island
+	FRandomStream Rng(8080);
+	for (int32 i = 0; i < 11; ++i)
+	{
+		const float Angle = FMath::DegreesToRadians(132.0f + i * 9.6f);
+		const float Dist = 104000.0f + Rng.FRandRange(-7000.0f, 9000.0f);
+		const float X = MountainCenter.X + FMath::Cos(Angle) * Dist, Y = MountainCenter.Y + FMath::Sin(Angle) * Dist;
+		const float Ground = FMath::Max(Height(X, Y), 0.0f);
+		AddMist(FVector(X, Y, Ground + 2100.0f), 46000.0f, Rng.FRandRange(0.0f, 360.0f));
+		AddMist(FVector(X + 5000.0f, Y - 3000.0f, Ground + 3900.0f), 34000.0f, Rng.FRandRange(0.0f, 360.0f));
+	}
+
+	// low mist drifts over the lake
+	AddMist(FVector(LakeCenter.X, LakeCenter.Y, 260.0f), 26000.0f, 20.0f);
+	AddMist(FVector(LakeCenter.X - 4000.0f, LakeCenter.Y + 5000.0f, 520.0f), 20000.0f, 110.0f);
+
+	// --- birds ---------------------------------------------------------------------------------
+	// white cranes wheel in front of the mountain's dark forest
+	const FLinearColor Crane(0.95f, 0.95f, 0.93f), Crow(0.018f, 0.018f, 0.022f);
+	const FVector2D CraneSpots[] = { FVector2D(42000, -17000), FVector2D(34000, 27000), FVector2D(72000, 2000) };
+	for (int32 i = 0; i < 3; ++i)
+	{
+		const FVector Center = Ground(CraneSpots[i]);
+		AddFlock(Center, 9000.0f + i * 2500.0f, 4200.0f + i * 2200.0f, 8200.0f + i * 3200.0f, 48, 1500.0f, 3.2f + i * 0.7f, Crane);
+	}
+
+	// --- groves --------------------------------------------------------------------------------
+	// bamboo stands beside the violet slope, blossom rings the pagoda and the shrine, and cypress guards the memorial
+	const FLinearColor Blossom(7.5f, 1.7f, 8.5f);
+	PlaceGrove(TEXT("Tree_Giant_Bamboo/Tree_Giant_Bamboo_01/Tree_Giant_Bamboo_01"), FVector2D(-61500, 11500), 2400.0f, 260, 0.6f, 0.95f, nullptr, 31);
+	PlaceGrove(TEXT("Tree_Giant_Bamboo/Tree_Giant_Bamboo_01/Tree_Giant_Bamboo_01"), FVector2D(-24500, 14500), 1900.0f, 170, 0.6f, 0.95f, nullptr, 32);
+
+	if (const FFuyuSite* Lookout = FindSite(TEXT("Lookout")))
+	{
+		PlaceGrove(TEXT("Tree_Yoshino_Cherry/Tree_Yoshino_Cherry_01/Tree_Yoshino_Cherry_01"), Lookout->Pos + FVector2D(-1500, -2600), 2100.0f, 12, 0.6f, 0.85f, &Blossom, 33);
+	}
+	if (const FFuyuSite* Shrine = FindSite(TEXT("Shrine")))
+	{
+		PlaceGrove(TEXT("Tree_Yoshino_Cherry/Tree_Yoshino_Cherry_01/Tree_Yoshino_Cherry_01"), Shrine->Pos + FVector2D(1500, 0), 3000.0f, 9, 0.6f, 0.85f, &Blossom, 34);
+	}
+	if (const FFuyuSite* Memorial = FindSite(TEXT("Memorial")))
+	{
+		PlaceGrove(TEXT("Tree_Japanese_Cypress/Tree_Japanese_Cypress_01/Tree_Japanese_Cypress_01"), Memorial->Pos + FVector2D(0, 5200), 2600.0f, 22, 0.6f, 0.9f, nullptr, 35);
+	}
+}
+
+void AFuyuWorld::BuildMemorial(const FFuyuSite& Site)
+{
+	FRandomStream Rng(GetTypeHash(Site.Id));
+
+	// a way of flat stones follows the trail through the field
+	for (float Along = -5200.0f; Along <= 5200.0f; Along += 92.0f)
+	{
+		// the trail wanders, so look sideways for where it actually runs at this point
+		float BestRight = 0.0f, BestDistance = MAX_flt;
+		for (float Right = -900.0f; Right <= 900.0f; Right += 60.0f)
+		{
+			const FVector P = SitePoint(Site, Along, Right);
+			const float D = FuyuTerrain::PathDistance(P.X, P.Y);
+			if (D < BestDistance)
+			{
+				BestDistance = D;
+				BestRight = Right;
+			}
+		}
+
+		for (float Side : { -72.0f, 0.0f, 72.0f })
+		{
+			if (Rng.FRand() < 0.88f)
+			{
+				Place(EProp::PathSlab, SitePoint(Site, Along + Rng.FRandRange(-22.0f, 22.0f), BestRight + Side + Rng.FRandRange(-14.0f, 14.0f)), Rng.FRandRange(0.0f, 360.0f), Rng.FRandRange(0.85f, 1.2f));
+			}
+		}
+	}
+
+	// markers stand among the flowers in loose ranks, a few leaning
+	for (int32 i = 0; i < 34; ++i)
+	{
+		const float Along = Rng.FRandRange(-4300.0f, 4300.0f);
+		const float Right = (Rng.FRand() < 0.5f ? -1.0f : 1.0f) * Rng.FRandRange(520.0f, 3600.0f);
+		const FVector P = SitePoint(Site, Along, Right);
+		if (FuyuTerrain::PathDistance(P.X, P.Y) > 420.0f)
+		{
+			GetScatter(EProp::GravePillar)->AddInstance(FTransform(FRotator(Rng.FRandRange(-5.0f, 5.0f), Rng.FRandRange(0.0f, 360.0f), Rng.FRandRange(-5.0f, 5.0f)), P - FVector(0, 0, 10.0f), FVector(Rng.FRandRange(0.8f, 1.35f))), true);
+		}
+	}
+
+	// a small wayside shrine watches over them, with a pair of lanterns
+	// the hall stands about three times the samurai's height
+	Place(EProp::ShrineHall, SitePoint(Site, -600.0f, 1800.0f), Site.Yaw + 90.0f, 0.76f);
+	Place(EProp::StoneLantern, SitePoint(Site, -120.0f, 1280.0f), Site.Yaw);
+	Place(EProp::StoneLantern, SitePoint(Site, -1080.0f, 1280.0f), Site.Yaw);
+
+	// ground mist pools here, and crows turn overhead
+	const FVector Center = SitePoint(Site, 0.0f, 0.0f);
+	AddMist(Center + FVector(0, 0, 380.0f), 15000.0f, 0.0f);
+	AddMist(Center + FVector(2600.0f, -1800.0f, 760.0f), 12000.0f, 70.0f);
+	AddMist(Center + FVector(-3000.0f, 2200.0f, 1200.0f), 14000.0f, 140.0f);
+	AddFlock(Center, 2600.0f, 320.0f, 1900.0f, 130, 950.0f, 1.0f, FLinearColor(0.018f, 0.018f, 0.022f));
 }
 
 void AFuyuWorld::BuildSites()
@@ -857,10 +1211,15 @@ void AFuyuWorld::BuildSites()
 		{
 		case EFuyuSiteType::Camp:
 			BuildCamp(Site);
+			AddFlock(SitePoint(Site, 0.0f, 0.0f), 1700.0f, 900.0f, 1600.0f, 12, 800.0f, 1.0f, FLinearColor(0.018f, 0.018f, 0.022f));
 			break;
 
 		case EFuyuSiteType::Shrine:
 			BuildShrine(Site);
+			break;
+
+		case EFuyuSiteType::Memorial:
+			BuildMemorial(Site);
 			break;
 
 		case EFuyuSiteType::Start:
@@ -872,10 +1231,18 @@ void AFuyuWorld::BuildSites()
 			break;
 
 		case EFuyuSiteType::Lookout:
-			Place(EProp::Torii, SitePoint(Site, 0.0f, 0.0f), Site.Yaw + 90.0f);
-			Place(EProp::Maple, SitePoint(Site, -600.0f, 500.0f), 10.0f, 1.8f);
-			Place(EProp::StoneLantern, SitePoint(Site, 300.0f, -380.0f), 0.0f);
+		{
+			// a pagoda crowns the hill above the violet slope, with a gate on the side the trail climbs from
+			Place(EProp::Pagoda, SitePoint(Site, 0.0f, 0.0f), 20.0f);
+
+			const FFuyuSite* Start = FuyuTerrain::FindSite(TEXT("Start"));
+			const FVector2D ToStart = Start ? (Start->Pos - Site.Pos).GetSafeNormal() : FVector2D(-1, 0);
+			const FVector Gate = FuyuTerrain::Ground(Site.Pos + ToStart * 1900.0f);
+			Place(EProp::Torii, Gate, FMath::RadiansToDegrees(FMath::Atan2(ToStart.Y, ToStart.X)));
+			Place(EProp::StoneLantern, FuyuTerrain::Ground(Site.Pos + ToStart * 1300.0f + FVector2D(-ToStart.Y, ToStart.X) * 420.0f), 0.0f);
+			Place(EProp::StoneLantern, FuyuTerrain::Ground(Site.Pos + ToStart * 1300.0f - FVector2D(-ToStart.Y, ToStart.X) * 420.0f), 0.0f);
 			break;
+		}
 		}
 	}
 }
@@ -1070,6 +1437,9 @@ void AFuyuWorld::BuildGrassCell(FFuyuGrassCell& Cell, bool bNear)
 				continue;
 			}
 
+			FLinearColor Bloom;
+			const float Blooming = Flowers(X, Y, Bloom);
+
 			EProp Prop = EProp::GrassClump;
 			FLinearColor Tint = GroundColor(X, Y, H, CellNormalZ) * 1.2f;
 			float PropScale = Scale * SizeBoost;
@@ -1081,11 +1451,12 @@ void AFuyuWorld::BuildGrassCell(FFuyuGrassCell& Cell, bool bNear)
 				Tint = FLinearColor::White;
 				PropScale = Scale;
 			}
-			else if (CellFlower > 0.35f && Kind < 0.26f * CellFlower)
+			else if (Blooming > 0.0f && Kind < Blooming * 0.92f)
 			{
-				Prop = EProp::FlowerClump;
-				Tint = FLinearColor::White;
-				PropScale = Scale;
+				// flower fields: nearly every clump is a patch of blooms, each a shade off its neighbours
+				Prop = EProp::FlowerCarpet;
+				Tint = Bloom * FMath::Lerp(0.78f, 1.12f, Kind / FMath::Max(Blooming, 0.01f));
+				PropScale = Scale * (bNear ? 1.0f : 1.7f);
 			}
 			else if (CellReed > 0.12f && Kind > 0.945f)
 			{
@@ -1098,7 +1469,7 @@ void AFuyuWorld::BuildGrassCell(FFuyuGrassCell& Cell, bool bNear)
 			uint8 Key = (uint8)Prop;
 			if (Prop == EProp::GrassClump && ScannedGrass.Num() > 0)
 			{
-				const bool bGreen = (CellForest > 0.35f || CellFlower > 0.3f) && ScannedGrass.Num() > NumDryGrass;
+				const bool bGreen = (CellForest > 0.35f || CellFlower > 0.3f || Blooming > 0.1f) && ScannedGrass.Num() > NumDryGrass;
 				const int32 First = bGreen ? NumDryGrass : 0;
 				const int32 Count = bGreen ? ScannedGrass.Num() - NumDryGrass : FMath::Max(NumDryGrass, 1);
 				Key = (uint8)(100 + First + (int32)(Kind * 997.0f) % Count);
@@ -1337,6 +1708,9 @@ void AFuyuWorld::ApplyGrade()
 	S.bOverride_MotionBlurAmount = true;
 	S.MotionBlurAmount = 0.22f;
 
+	S.bOverride_ColorGain = true;
+	S.ColorGain = FVector4(1.0, 1.0, 1.0, 1.0);
+
 	S.bOverride_VignetteIntensity = true;
 	S.bOverride_FilmGrainIntensity = true;
 	S.bOverride_ColorSaturation = true;
@@ -1373,4 +1747,11 @@ void AFuyuWorld::ApplyGrade()
 		S.FilmSlope = 0.88f;
 		S.FilmToe = 0.47f;
 	}
+
+	// night is exposed darker and graded cold, or the eye's adaptation would turn moonlight into a blue noon
+	const float Dark = GetNightAmount();
+	S.AutoExposureBias += NightExposure * Dark;
+	S.ColorGain = FMath::Lerp(FVector4(1.0, 1.0, 1.0, 1.0), FVector4(0.84, 0.93, 1.16, 1.0), (double)Dark);
+	S.ColorSaturation = S.ColorSaturation * FMath::Lerp(1.0, 0.86, (double)Dark);
+	S.ColorSaturation.W = 1.0;
 }

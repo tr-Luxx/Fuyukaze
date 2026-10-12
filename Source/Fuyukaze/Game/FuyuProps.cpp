@@ -3,6 +3,9 @@
 #include "Engine/StaticMesh.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Serialization/MemoryReader.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/Package.h"
 
@@ -24,6 +27,18 @@ namespace
 		}
 
 		Mat->AddToRoot();
+		return Mat;
+	}
+
+	/** For materials the game can do without: null if it has not been built, rather than the grey stand-in */
+	UMaterialInterface* LoadOptionalMat(const TCHAR* Name)
+	{
+		const FString Path = FString::Printf(TEXT("/Game/Fuyukaze/Materials/%s.%s"), Name, Name);
+		UMaterialInterface* Mat = LoadObject<UMaterialInterface>(nullptr, *Path, nullptr, LOAD_NoWarn);
+		if (Mat)
+		{
+			Mat->AddToRoot();
+		}
 		return Mat;
 	}
 
@@ -438,6 +453,104 @@ namespace
 		return B.Build(GetTransientPackage(), TEXT("SM_Campfire"), { M.Prop, M.Glow });
 	}
 
+	/**
+	 *  Reads a model converted by one of the Tools/convert_*.py scripts from Content/Fuyukaze/Models into a builder.
+	 *  The file is a plain list of vertices and triangles per material, already posed the way the game wants it.
+	 *  Returns false if it is missing or damaged
+	 */
+	bool LoadModelFile(const TCHAR* FileName, uint32 NumMaterials, FFuyuMeshBuilder& B)
+	{
+		TArray<uint8> Bytes;
+		if (!FFileHelper::LoadFileToArray(Bytes, *(FPaths::ProjectContentDir() / TEXT("Fuyukaze/Models") / FileName), FILEREAD_Silent))
+		{
+			return false;
+		}
+
+		// "FUYM" files hold position, normal, tangent and texture coordinate per vertex; "FUYC" files add a colour
+		FMemoryReader Ar(Bytes);
+		uint32 Magic = 0, NumSections = 0;
+		Ar << Magic << NumSections;
+		const bool bColours = Magic == 0x43595546;
+		if ((Magic != 0x4D595546 && !bColours) || NumSections > NumMaterials)
+		{
+			return false;
+		}
+
+		const int32 Floats = bColours ? 16 : 12;
+		for (uint32 s = 0; s < NumSections && !Ar.IsError(); ++s)
+		{
+			uint32 Material = 0, NumVertices = 0, NumIndices = 0;
+			Ar << Material << NumVertices << NumIndices;
+			if (Material >= NumMaterials || (int64)NumVertices * Floats * 4 + (int64)NumIndices * 4 > Ar.TotalSize() - Ar.Tell())
+			{
+				return false;
+			}
+
+			const int32 Base = B.Positions.Num();
+			for (uint32 v = 0; v < NumVertices; ++v)
+			{
+				float F[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1 };
+				Ar.Serialize(F, Floats * sizeof(float));
+				B.Positions.Add(FVector3f(F[0], F[1], F[2]));
+				B.Normals.Add(FVector3f(F[3], F[4], F[5]));
+				B.Tangents.Add(FVector4f(F[6], F[7], F[8], -F[9]));
+				B.UVs.Add(FVector2f(F[10], F[11]));
+				B.Colors.Add(FLinearColor(F[12], F[13], F[14], F[15]));
+			}
+
+			TArray<uint32> Indices;
+			Indices.SetNumUninitialized(NumIndices);
+			Ar.Serialize(Indices.GetData(), NumIndices * sizeof(uint32));
+
+			B.Slot = (int32)Material;
+			for (uint32 t = 0; t + 2 < NumIndices; t += 3)
+			{
+				int32 I0 = Base + Indices[t], I1 = Base + Indices[t + 1], I2 = Base + Indices[t + 2];
+				if (!B.Positions.IsValidIndex(I0) || !B.Positions.IsValidIndex(I1) || !B.Positions.IsValidIndex(I2))
+				{
+					return false;
+				}
+
+				// face each triangle the way its normals point, whichever way round the file wound it
+				const FVector3f Front = FVector3f::CrossProduct(B.Positions[I2] - B.Positions[I0], B.Positions[I1] - B.Positions[I0]);
+				if (FVector3f::DotProduct(Front, B.Normals[I0] + B.Normals[I1] + B.Normals[I2]) < 0.0f)
+				{
+					Swap(I1, I2);
+				}
+				B.AddTri(I0, I1, I2);
+			}
+		}
+
+		return !Ar.IsError() && B.Positions.Num() > 0;
+	}
+
+	/** The modelled katana, if it has been converted (Tools/convert_katana.py) and its materials built */
+	UStaticMesh* LoadKatanaModel()
+	{
+		const FFuyuMaterials& M = FFuyuMaterials::Get();
+		FFuyuMeshBuilder B;
+		if (!M.KatanaParts[0] || !M.KatanaParts[1] || !M.KatanaParts[2] || !M.KatanaParts[3] || !M.KatanaParts[4] || !LoadModelFile(TEXT("Katana.fuyumesh"), UE_ARRAY_COUNT(M.KatanaParts), B))
+		{
+			return nullptr;
+		}
+		return B.Build(GetTransientPackage(), TEXT("SM_KatanaModel"), { M.KatanaParts[0], M.KatanaParts[1], M.KatanaParts[2], M.KatanaParts[3], M.KatanaParts[4] });
+	}
+
+	/**
+	 *  The horse (Tools/convert_horse.py). Its vertex colours are not paint but its rig: how much each vertex belongs
+	 *  to the front legs, hind legs, neck and tail, which the horse material moves to make it gallop
+	 */
+	UStaticMesh* LoadHorseModel()
+	{
+		const FFuyuMaterials& M = FFuyuMaterials::Get();
+		FFuyuMeshBuilder B;
+		if (!M.Horse || !LoadModelFile(TEXT("Horse.fuyumesh"), 1, B))
+		{
+			return nullptr;
+		}
+		return B.Build(GetTransientPackage(), TEXT("SM_Horse"), { M.Horse });
+	}
+
 	/** Weapons are modelled with the grip at the origin and the business end along +X */
 	UStaticMesh* MakeWeapon(FuyuProps::EProp Prop)
 	{
@@ -447,6 +560,12 @@ namespace
 
 		if (Prop == FuyuProps::EProp::Katana)
 		{
+			// the modelled sword if it is there, otherwise the simple one built here
+			if (UStaticMesh* Model = LoadKatanaModel())
+			{
+				return Model;
+			}
+
 			B.Slot = 0;
 			B.Cylinder(FVector(-13, 0, 0), FVector(13, 0, 0), 1.9f, 1.7f, 8, FLinearColor(0.02f, 0.02f, 0.03f), FLinearColor(0.07f, 0.02f, 0.02f));
 			B.Cylinder(FVector(13, 0, 0), FVector(14.2f, 0, 0), 4.6f, 4.6f, 10, FLinearColor(0.25f, 0.18f, 0.05f), FLinearColor(0.25f, 0.18f, 0.05f));
@@ -608,6 +727,186 @@ namespace
 	}
 }
 
+namespace
+{
+	UStaticMesh* MakeScenery(FuyuProps::EProp Prop)
+	{
+		const FFuyuMaterials& M = FFuyuMaterials::Get();
+		FFuyuMeshBuilder B;
+
+		if (Prop == FuyuProps::EProp::FlowerCarpet)
+		{
+			// a patch of low leaves crowded with open, five-petalled flowers. Petals are white so that the
+			// instance tint alone decides whether this is a blue, violet, yellow or white field
+			FRandomStream Rng(515);
+			const FLinearColor LeafLow(0.03f, 0.075f, 0.02f), LeafHigh(0.085f, 0.19f, 0.05f);
+
+			for (int32 i = 0; i < 26; ++i)
+			{
+				const FVector Root(Rng.FRandRange(-46.0f, 46.0f), Rng.FRandRange(-46.0f, 46.0f), -3.0f);
+				B.Blade(Root, Rng.FRandRange(0.0f, 360.0f), Rng.FRandRange(14.0f, 30.0f), Rng.FRandRange(3.5f, 6.0f), Rng.FRandRange(6.0f, 16.0f), LeafLow, LeafHigh, 2);
+			}
+
+			for (int32 i = 0; i < 24; ++i)
+			{
+				const float H = Rng.FRandRange(22.0f, 40.0f);
+				const FVector Head(Rng.FRandRange(-46.0f, 46.0f), Rng.FRandRange(-46.0f, 46.0f), H);
+				const float Size = Rng.FRandRange(3.4f, 5.2f);
+				const float Spin = Rng.FRandRange(0.0f, 72.0f);
+
+				// tilt each bloom a little so the field catches the light unevenly
+				const FVector Up = (FVector::UpVector + FVector(Rng.FRandRange(-0.35f, 0.35f), Rng.FRandRange(-0.35f, 0.35f), 0.0f)).GetSafeNormal();
+				FVector AxisU, AxisV;
+				Up.FindBestAxisVectors(AxisU, AxisV);
+
+				const int32 Center = B.AddVertex(Head, Up, FVector2D(0.5, 0.5), FLinearColor(0.55f, 0.5f, 0.2f, 0.8f));
+				for (int32 p = 0; p < 5; ++p)
+				{
+					const float A0 = FMath::DegreesToRadians(Spin + p * 72.0f - 27.0f);
+					const float A1 = FMath::DegreesToRadians(Spin + p * 72.0f + 27.0f);
+					const float Am = FMath::DegreesToRadians(Spin + p * 72.0f);
+					const FLinearColor Petal(1.0f, 1.0f, 1.0f, 0.8f);
+					const int32 L = B.AddVertex(Head + (AxisU * FMath::Cos(A0) + AxisV * FMath::Sin(A0)) * Size * 0.72f + Up * 1.2f, Up, FVector2D(0, 0), Petal);
+					const int32 R = B.AddVertex(Head + (AxisU * FMath::Cos(A1) + AxisV * FMath::Sin(A1)) * Size * 0.72f + Up * 1.2f, Up, FVector2D(1, 0), Petal);
+					const int32 T = B.AddVertex(Head + (AxisU * FMath::Cos(Am) + AxisV * FMath::Sin(Am)) * Size + Up * 2.2f, Up, FVector2D(0.5, 1), Petal);
+					B.AddTri(Center, L, R);
+					B.AddTri(L, T, R);
+				}
+			}
+			return B.Build(GetTransientPackage(), TEXT("SM_FlowerCarpet"), { M.Flower });
+		}
+
+		if (Prop == FuyuProps::EProp::GravePillar)
+		{
+			// a weathered square marker, slightly tapered, on a wider foot
+			const FLinearColor Low(0.2f, 0.23f, 0.2f), High(0.36f, 0.38f, 0.35f);
+			B.Box(FVector(0, 0, 9), FVector(34, 34, 12), Low);
+			B.Cylinder(FVector(0, 0, 18), FVector(0, 0, 250), 27.0f, 22.0f, 4, Low, High, false);
+			B.Cylinder(FVector(0, 0, 250), FVector(0, 0, 268), 22.0f, 6.0f, 4, High, High, true);
+
+			UStaticMesh* Mesh = B.Build(GetTransientPackage(), TEXT("SM_GravePillar"), { M.Prop });
+			FFuyuMeshBuilder::AddBoxCollision(Mesh, FVector(0, 0, 130), FVector(22, 22, 130));
+			FFuyuMeshBuilder::FinishCollision(Mesh);
+			return Mesh;
+		}
+
+		if (Prop == FuyuProps::EProp::PathSlab)
+		{
+			// one irregular paving stone, lying flush with the ground
+			const FLinearColor Paving(0.2f, 0.205f, 0.2f);
+			const FVector Corners[6] = { FVector(-52, -30, 0), FVector(-8, -44, 0), FVector(50, -28, 0), FVector(56, 22, 0), FVector(6, 42, 0), FVector(-48, 30, 0) };
+			const int32 Mid = B.AddVertex(FVector(0, 0, 7), FVector::UpVector, FVector2D(0.5, 0.5), Paving);
+			TArray<int32> Rim, Skirt;
+			for (const FVector& P : Corners)
+			{
+				Rim.Add(B.AddVertex(P + FVector(0, 0, 6), FVector::UpVector, FVector2D(0, 0), Paving * 0.9f));
+				Skirt.Add(B.AddVertex(P * 1.06f + FVector(0, 0, -4), P.GetSafeNormal(), FVector2D(0, 1), Paving * 0.55f));
+			}
+			for (int32 i = 0; i < 6; ++i)
+			{
+				const int32 j = (i + 1) % 6;
+				B.AddTri(Mid, Rim[j], Rim[i]);
+				B.AddQuad(Rim[i], Rim[j], Skirt[j], Skirt[i]);
+			}
+			return B.Build(GetTransientPackage(), TEXT("SM_PathSlab"), { M.Prop });
+		}
+
+		if (Prop == FuyuProps::EProp::Pagoda)
+		{
+			// a five-storey pagoda: each storey a little smaller than the one below, under a wide dark roof
+			const FLinearColor Timber(0.42f, 0.07f, 0.035f), Daub(0.6f, 0.56f, 0.48f), Tile(0.045f, 0.05f, 0.06f), Gilt(0.7f, 0.5f, 0.12f);
+			B.Box(FVector(0, 0, 40), FVector(560, 560, 60), FLinearColor(0.3f, 0.3f, 0.29f));
+
+			float Z = 100.0f;
+			for (int32 Tier = 0; Tier < 5; ++Tier)
+			{
+				const float Half = 360.0f - Tier * 46.0f;
+				const float Wall = 300.0f - Tier * 14.0f;
+				B.Box(FVector(0, 0, Z + Wall * 0.5f), FVector(Half, Half, Wall * 0.5f), Tier % 2 == 0 ? Daub : Timber);
+
+				for (float SX : { -1.0f, 1.0f })
+				{
+					for (float SY : { -1.0f, 1.0f })
+					{
+						B.Box(FVector(SX * Half, SY * Half, Z + Wall * 0.5f), FVector(16, 16, Wall * 0.5f), Timber);
+					}
+				}
+
+				// the roof sweeps out well past the walls and lifts at the corners
+				const float Eave = Half + 250.0f, Base = Z + Wall, Rise = 150.0f, Inner = Half * 0.72f;
+				const FVector E[4] = { FVector(-Eave, -Eave, Base + 26), FVector(Eave, -Eave, Base + 26), FVector(Eave, Eave, Base + 26), FVector(-Eave, Eave, Base + 26) };
+				const FVector R[4] = { FVector(-Inner, -Inner, Base + Rise), FVector(Inner, -Inner, Base + Rise), FVector(Inner, Inner, Base + Rise), FVector(-Inner, Inner, Base + Rise) };
+				for (int32 s = 0; s < 4; ++s)
+				{
+					const int32 n = (s + 1) % 4;
+					const FVector MidEave = (E[s] + E[n]) * 0.5f - FVector(0, 0, 26);
+					B.Quad(E[s], MidEave, (R[s] + R[n]) * 0.5f, R[s], Tile);
+					B.Quad(MidEave, E[n], R[n], (R[s] + R[n]) * 0.5f, Tile);
+				}
+				B.Quad(E[0], E[1], E[2], E[3], Timber * 0.5f);
+				B.Quad(R[3], R[2], R[1], R[0], Tile);
+
+				Z = Base + Rise - 10.0f;
+			}
+
+			// the finial: a slender mast of rings
+			B.Cylinder(FVector(0, 0, Z), FVector(0, 0, Z + 620), 14.0f, 5.0f, 8, Gilt, Gilt);
+			for (int32 i = 0; i < 7; ++i)
+			{
+				B.Cylinder(FVector(0, 0, Z + 90 + i * 62), FVector(0, 0, Z + 104 + i * 62), 52.0f - i * 5.0f, 52.0f - i * 5.0f, 10, Gilt, Gilt);
+			}
+
+			UStaticMesh* Mesh = B.Build(GetTransientPackage(), TEXT("SM_Pagoda"), { M.Prop });
+			FFuyuMeshBuilder::AddBoxCollision(Mesh, FVector(0, 0, 50), FVector(560, 560, 60));
+			FFuyuMeshBuilder::AddBoxCollision(Mesh, FVector(0, 0, 900), FVector(360, 360, 800));
+			FFuyuMeshBuilder::FinishCollision(Mesh);
+			return Mesh;
+		}
+
+		if (Prop == FuyuProps::EProp::TrailLine)
+		{
+			// a streak of light one metre long, as two crossed ribbons so it reads from any side. V is 1 along
+			// the spine and 0 at the edges, which the slash material turns into a bright core with a soft falloff
+			for (int32 Plane = 0; Plane < 2; ++Plane)
+			{
+				const FVector Across = Plane == 0 ? FVector(0, 1, 0) : FVector(0, 0, 1);
+				const int32 Segs = 12;
+				TArray<int32> Rows[3];
+				for (int32 i = 0; i <= Segs; ++i)
+				{
+					const float T = (float)i / Segs;
+					for (int32 r = 0; r < 3; ++r)
+					{
+						Rows[r].Add(B.AddVertex(FVector(T * 100.0f, 0, 0) + Across * (r - 1.0f), FVector::UpVector, FVector2D(T, r == 1 ? 1.0 : 0.0), FLinearColor::White));
+					}
+				}
+				for (int32 i = 0; i < Segs; ++i)
+				{
+					B.AddQuad(Rows[0][i], Rows[0][i + 1], Rows[1][i + 1], Rows[1][i]);
+					B.AddQuad(Rows[1][i], Rows[1][i + 1], Rows[2][i + 1], Rows[2][i]);
+				}
+			}
+			return B.Build(GetTransientPackage(), TEXT("SM_TrailLine"), { M.Slash });
+		}
+
+		// a bird seen from far below: a small body and two long wings. Alpha rises towards the wingtips,
+		// which the bird material uses to make them beat
+		const FLinearColor Body(1, 1, 1, 0), Mid(1, 1, 1, 0.45f), Tip(1, 1, 1, 1);
+		const int32 Nose = B.AddVertex(FVector(22, 0, 0), FVector::UpVector, FVector2D(0.5, 0), Body);
+		const int32 Tail = B.AddVertex(FVector(-26, 0, 0), FVector::UpVector, FVector2D(0.5, 1), Body);
+		for (float Side : { -1.0f, 1.0f })
+		{
+			const int32 Elbow = B.AddVertex(FVector(4, Side * 30, 0), FVector::UpVector, FVector2D(0.5 + Side * 0.25, 0.4), Mid);
+			const int32 Back = B.AddVertex(FVector(-12, Side * 26, 0), FVector::UpVector, FVector2D(0.5 + Side * 0.25, 0.7), Mid);
+			const int32 Wing = B.AddVertex(FVector(-8, Side * 64, 0), FVector::UpVector, FVector2D(0.5 + Side * 0.5, 0.5), Tip);
+			B.AddTri(Nose, Elbow, Tail);
+			B.AddTri(Elbow, Back, Tail);
+			B.AddTri(Elbow, Wing, Back);
+		}
+		return B.Build(GetTransientPackage(), TEXT("SM_Bird"), { M.Bird });
+	}
+}
+
 void FFuyuMaterials::Load()
 {
 	Terrain = LoadMat(TEXT("M_FuyuTerrain"));
@@ -620,6 +919,17 @@ void FFuyuMaterials::Load()
 	Water = LoadMat(TEXT("M_FuyuWater"));
 	Streak = LoadMat(TEXT("M_FuyuStreak"));
 	Slash = LoadMat(TEXT("M_FuyuSlash"));
+	Flower = LoadMat(TEXT("M_FuyuFlower"));
+	Bird = LoadMat(TEXT("M_FuyuBird"));
+	Mist = LoadMat(TEXT("M_FuyuMist"));
+	Sky = LoadOptionalMat(TEXT("M_FuyuSky"));
+	Horse = LoadOptionalMat(TEXT("M_FuyuHorse"));
+
+	const TCHAR* KatanaNames[] = { TEXT("M_KatanaWrap"), TEXT("M_KatanaBlade"), TEXT("M_KatanaLacquer"), TEXT("M_KatanaGilt"), TEXT("M_KatanaCollar") };
+	for (int32 i = 0; i < UE_ARRAY_COUNT(KatanaNames); ++i)
+	{
+		KatanaParts[i] = LoadOptionalMat(KatanaNames[i]);
+	}
 }
 
 const FFuyuMaterials& FFuyuMaterials::Get()
@@ -691,6 +1001,10 @@ UStaticMesh* FuyuProps::Get(EProp Prop)
 	case EProp::Club:
 		Mesh = MakeWeapon(Prop);
 		break;
+	case EProp::Horse:
+		// null if the model has not been converted, in which case the island simply has no horses
+		Mesh = LoadHorseModel();
+		break;
 	case EProp::Kasa:
 		Mesh = MakeKasa();
 		break;
@@ -703,6 +1017,14 @@ UStaticMesh* FuyuProps::Get(EProp Prop)
 	case EProp::SlashArc:
 	case EProp::Spark:
 		Mesh = MakeEffect(Prop);
+		break;
+	case EProp::FlowerCarpet:
+	case EProp::GravePillar:
+	case EProp::PathSlab:
+	case EProp::Pagoda:
+	case EProp::Bird:
+	case EProp::TrailLine:
+		Mesh = MakeScenery(Prop);
 		break;
 	default:
 		break;

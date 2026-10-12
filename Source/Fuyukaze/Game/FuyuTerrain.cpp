@@ -92,7 +92,8 @@ namespace
 			Add(TEXT("CampLake"), LOCTEXT("SiteLake", "Lakeside Camp"), EFuyuSiteType::Camp, FVector2D(-27000, 38000), 3000.0f, 226.0f);
 			Add(TEXT("CampRidge"), LOCTEXT("SiteRidge", "Ridge Watch"), EFuyuSiteType::Camp, FVector2D(-4000, -52000), 3000.0f, 153.0f);
 			Add(TEXT("Shrine"), LOCTEXT("SiteShrine", "Shrine of the First Snow"), EFuyuSiteType::Shrine, FVector2D(24000, 4000), 3400.0f, 180.0f);
-			Add(TEXT("Lookout"), LOCTEXT("SiteLookout", "Crane's Rest"), EFuyuSiteType::Lookout, FVector2D(-52000, 12000), 900.0f, 0.0f);
+			Add(TEXT("Lookout"), LOCTEXT("SiteLookout", "Crane's Rest"), EFuyuSiteType::Lookout, FVector2D(-52000, 12000), 1500.0f, 0.0f);
+			Add(TEXT("Memorial"), LOCTEXT("SiteMemorial", "Field of Remembrance"), EFuyuSiteType::Memorial, FVector2D(-18000, 8000), 2400.0f, 173.0f);
 
 			for (const FFuyuSite& S : Sites)
 			{
@@ -140,11 +141,17 @@ namespace
 	}
 
 	/** Returns how deep inside a site this point is (0 outside, 1 on the levelled ground) */
-	float SiteInfluence(float X, float Y, float Margin = 0.0f)
+	float SiteInfluence(float X, float Y, float Margin = 0.0f, bool bClearedOnly = false)
 	{
 		float Best = 0.0f;
 		for (const FFuyuSite& S : GetCache().Sites)
 		{
+			// the memorial field is levelled like any site, but its ground is left to the flowers
+			if (bClearedOnly && S.Type == EFuyuSiteType::Memorial)
+			{
+				continue;
+			}
+
 			const float D = FVector2D::Distance(FVector2D(X, Y), S.Pos);
 			Best = FMath::Max(Best, Smooth(S.Radius * 1.7f + Margin, S.Radius + Margin, D));
 		}
@@ -206,6 +213,11 @@ FVector FuyuTerrain::Ground(const FVector2D& P)
 	return FVector(P.X, P.Y, Height(P.X, P.Y));
 }
 
+namespace
+{
+	float FieldAmount(float X, float Y, int32& OutIndex);
+}
+
 float FuyuTerrain::ForestMask(float X, float Y)
 {
 	const float N = Fbm(X / 26000.0f + 90.0f, Y / 26000.0f - 60.0f, 3);
@@ -223,7 +235,49 @@ float FuyuTerrain::ForestMask(float X, float Y)
 
 	Mask *= Smooth(350.0f, 1100.0f, PathDistance(X, Y));
 
+	// flower fields are open ground, with only the odd tree left standing in them
+	int32 Field;
+	Mask *= 1.0f - 0.93f * FieldAmount(X, Y, Field);
+
 	return Mask * (1.0f - SiteInfluence(X, Y, 300.0f));
+}
+
+namespace
+{
+	struct FFlowerField
+	{
+		FVector2D Pos;
+		float Radius;
+		FLinearColor Color;
+		FLinearColor Accent;
+	};
+
+	/** The island's named flower fields: white below the start hill, blue at the memorial, violet under the pagoda */
+	const FFlowerField GFlowerFields[] = {
+		{ FVector2D(-73500, -14500), 5600.0f, FLinearColor(0.92f, 0.92f, 0.86f), FLinearColor(0.95f, 0.8f, 0.15f) },
+		{ FVector2D(-18000, 8000),   7200.0f, FLinearColor(0.16f, 0.4f, 1.0f),   FLinearColor(0.55f, 0.75f, 1.0f) },
+		{ FVector2D(-57500, 5000),   6800.0f, FLinearColor(0.45f, 0.17f, 0.85f), FLinearColor(1.0f, 0.78f, 0.08f) },
+	};
+
+	/** Strength of the strongest named field at this point, and which one it is */
+	float FieldAmount(float X, float Y, int32& OutIndex)
+	{
+		const float Wobble = 1300.0f * Fbm(X / 5200.0f + 12.0f, Y / 5200.0f - 4.0f, 2);
+		float Best = 0.0f;
+		OutIndex = INDEX_NONE;
+
+		for (int32 i = 0; i < (int32)UE_ARRAY_COUNT(GFlowerFields); ++i)
+		{
+			const float D = FVector2D::Distance(FVector2D(X, Y), GFlowerFields[i].Pos) + Wobble;
+			const float A = Smooth(GFlowerFields[i].Radius, GFlowerFields[i].Radius * 0.72f, D);
+			if (A > Best)
+			{
+				Best = A;
+				OutIndex = i;
+			}
+		}
+		return Best;
+	}
 }
 
 float FuyuTerrain::FlowerMask(float X, float Y)
@@ -232,12 +286,32 @@ float FuyuTerrain::FlowerMask(float X, float Y)
 	return Smooth(0.12f, 0.3f, N) * (1.0f - ForestMask(X, Y));
 }
 
+float FuyuTerrain::Flowers(float X, float Y, FLinearColor& OutColor)
+{
+	int32 Index;
+	const float Field = FieldAmount(X, Y, Index);
+
+	if (Field > 0.02f)
+	{
+		// within a field the accent colour runs through in drifts, like the yellow band across the violet slope
+		const FFlowerField& F = GFlowerFields[Index];
+		const float Drift = Fbm(X / 2300.0f + Index * 9.0f, Y / 900.0f, 2);
+		OutColor = Drift > 0.24f ? F.Accent : F.Color;
+		return Field;
+	}
+
+	// elsewhere, loose meadows of white with the odd patch of yellow
+	const float Patch = Fbm(X / 3100.0f + 2.0f, Y / 3100.0f + 8.0f, 2);
+	OutColor = Patch > 0.2f ? FLinearColor(0.98f, 0.82f, 0.12f) : FLinearColor(0.93f, 0.93f, 0.88f);
+	return FlowerMask(X, Y) * 0.55f;
+}
+
 float FuyuTerrain::GrassDensity(float X, float Y, float H, float NormalZ)
 {
 	float Density = Smooth(160.0f, 420.0f, H);
 	Density *= Smooth(RockLine + 1500.0f, RockLine - 2500.0f, H);
 	Density *= Smooth(0.72f, 0.86f, NormalZ);
-	Density *= 1.0f - 0.92f * SiteInfluence(X, Y);
+	Density *= 1.0f - 0.92f * SiteInfluence(X, Y, 0.0f, true);
 	Density *= 1.0f - 0.45f * ForestMask(X, Y);
 	Density *= Smooth(170.0f, 420.0f, PathDistance(X, Y));
 	return Density;
@@ -261,7 +335,14 @@ FLinearColor FuyuTerrain::GroundColor(float X, float Y, float H, float NormalZ)
 
 	C = FMath::Lerp(C, Meadow, FlowerMask(X, Y) * 0.8f);
 	C = FMath::Lerp(C, ForestFloor, ForestMask(X, Y) * 0.75f);
-	C = FMath::Lerp(C, PackedEarth, SiteInfluence(X, Y) * 0.85f);
+
+	// flower fields: lush green underneath, washed with the colour of the bloom so the field still reads from a hilltop away
+	FLinearColor Bloom;
+	const float Blooming = Flowers(X, Y, Bloom);
+	C = FMath::Lerp(C, FLinearColor(0.085f, 0.17f, 0.045f), FMath::Min(Blooming * 1.2f, 0.9f));
+	C = FMath::Lerp(C, Bloom * 0.5f, Blooming * 0.5f);
+
+	C = FMath::Lerp(C, PackedEarth, SiteInfluence(X, Y, 0.0f, true) * 0.85f);
 
 	// terrain vertices are 7.5 m apart, so the trail is painted wide and soft; the gap in the grass gives it its edge
 	C = FMath::Lerp(C, PackedEarth, Smooth(1100.0f, 250.0f, PathDistance(X, Y)) * 0.75f);
@@ -274,7 +355,13 @@ FLinearColor FuyuTerrain::GroundColor(float X, float Y, float H, float NormalZ)
 	const FLinearColor RockCol = FMath::Lerp(DarkRock, Rock, Strata);
 	const float Steep = Smooth(0.84f, 0.68f, NormalZ);
 	const float High = Smooth(RockLine - 2500.0f, RockLine + 3000.0f, H + 1800.0f * Variation);
-	const float Rockiness = FMath::Max(Steep, High);
+
+	// the mountain's flanks are clothed in dark forest right up to the snow; only the steep upper cone shows bare rock
+	const float Ribs = 0.5f + 0.5f * Fbm(FMath::Atan2(Y - MountainCenter.Y, X - MountainCenter.X) * 9.0f, H / 9000.0f, 2);
+	const FLinearColor MountainForest = FMath::Lerp(FLinearColor(0.022f, 0.05f, 0.022f), FLinearColor(0.05f, 0.105f, 0.035f), Ribs);
+	C = FMath::Lerp(C, MountainForest, High * 0.92f);
+
+	const float Rockiness = Steep;
 	C = FMath::Lerp(C, RockCol, Rockiness);
 
 	// snow settles on the summit and clings less to steep faces

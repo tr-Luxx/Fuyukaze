@@ -30,6 +30,12 @@ enum class EFuyuSound : uint8
 	Kill,
 	/** A guard shattering */
 	Break,
+	/** Breath drawn in before the ultimate: a rising rush of air over a climbing tone */
+	Charge,
+	/** Two rising notes to call a horse */
+	Whistle,
+	/** A hoof striking turf */
+	Hoof,
 	Count
 };
 

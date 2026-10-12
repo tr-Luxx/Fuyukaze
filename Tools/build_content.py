@@ -8,6 +8,9 @@ changing a material below. Run it from the project folder with:
     Tools\\BuildContent.ps1
 """
 
+import json
+import os
+
 import unreal
 
 MAT_DIR = "/Game/Fuyukaze/Materials"
@@ -89,7 +92,64 @@ return float3(dir * bend, -abs(bend) * 0.22);
 """
 
 
-def wind_offset(material, vertex_color, amplitude, x, y):
+PART_CODE = """
+// Grass and flowers lean away from the samurai's feet and are pressed down a little, most strongly right
+// beside her and fading to nothing at the edge of the radius. P is the vertex, O the clump's root,
+// F the point between her feet, R the radius and S an overall strength.
+float2 away = P.xy - F.xy;
+float dist = length(away);
+float reach = saturate(1.0 - dist / max(R, 1.0));
+float level = saturate(1.0 - abs(O.z - F.z) / 170.0);
+float height = saturate((P.z - O.z) / 45.0);
+float push = reach * reach * level * height * S;
+float2 dir = dist > 0.01 ? away / dist : float2(1.0, 0.0);
+return float3(dir * push * 64.0, -push * 27.0);
+"""
+
+
+def shared_parameters():
+    """The collection the game writes the samurai's position into each frame. Made once and then kept,
+    because materials refer to its parameters by id."""
+    path = MAT_DIR + "/MPC_Fuyu"
+    if eal.does_asset_exist(path):
+        return unreal.load_asset(path)
+
+    collection = asset_tools.create_asset("MPC_Fuyu", MAT_DIR, unreal.MaterialParameterCollection, unreal.MaterialParameterCollectionFactoryNew())
+    feet = unreal.CollectionVectorParameter()
+    feet.set_editor_property("parameter_name", "PlayerFeet")
+    feet.set_editor_property("default_value", unreal.LinearColor(0.0, 0.0, -1000000.0, 0.0))
+    radius = unreal.CollectionScalarParameter()
+    radius.set_editor_property("parameter_name", "GrassPartRadius")
+    radius.set_editor_property("default_value", 135.0)
+    collection.set_editor_property("vector_parameters", [feet])
+    collection.set_editor_property("scalar_parameters", [radius])
+    eal.save_loaded_asset(collection)
+    log("built MPC_Fuyu")
+    return collection
+
+
+def part_offset(material, x, y, strength):
+    """World-position offset that parts foliage around the samurai. `strength` is a node giving its scale."""
+    collection = shared_parameters()
+    position = node(material, unreal.MaterialExpressionWorldPosition, x, y)
+    root = node(material, unreal.MaterialExpressionObjectPositionWS, x, y + 150)
+    feet = mel.create_material_expression(material, unreal.MaterialExpressionCollectionParameter, x, y + 300)
+    feet.set_editor_property("collection", collection)
+    feet.set_editor_property("parameter_name", "PlayerFeet")
+    radius = mel.create_material_expression(material, unreal.MaterialExpressionCollectionParameter, x, y + 450)
+    radius.set_editor_property("collection", collection)
+    radius.set_editor_property("parameter_name", "GrassPartRadius")
+
+    part = custom(material, x + 350, y, PART_CODE, unreal.CustomMaterialOutputType.CMOT_FLOAT3, ["P", "O", "F", "R", "S"])
+    link(position, "", part, "P")
+    link(root, "", part, "O")
+    link(feet, "", part, "F")
+    link(radius, "", part, "R")
+    link(strength, "", part, "S")
+    return part
+
+
+def wind_offset(material, vertex_color, amplitude, x, y, part=False):
     position = node(material, unreal.MaterialExpressionWorldPosition, x, y)
     time = node(material, unreal.MaterialExpressionTime, x, y + 150)
     amp = const(material, amplitude, x, y + 250)
@@ -98,7 +158,13 @@ def wind_offset(material, vertex_color, amplitude, x, y):
     link(time, "", wind, "T")
     link(vertex_color, "A", wind, "W")
     link(amp, "", wind, "A")
-    return wind
+    if not part:
+        return wind
+
+    both = node(material, unreal.MaterialExpressionAdd, x + 700, y)
+    link(wind, "", both, "A")
+    link(part_offset(material, x, y + 500, const(material, 1.0, x, y + 1100)), "", both, "B")
+    return both
 
 
 def finish(material):
@@ -267,7 +333,7 @@ def build_foliage(name, amplitude, roughness):
 
     out(m, const(m, roughness, -350, 350), "", MP.MP_ROUGHNESS)
     out(m, const(m, 0.15, -350, 450), "", MP.MP_SPECULAR)
-    out(m, wind_offset(m, vertex_color, amplitude, -900, 600), "", MP.MP_WORLD_POSITION_OFFSET)
+    out(m, wind_offset(m, vertex_color, amplitude, -900, 600, part=(name == "M_FuyuGrass")), "", MP.MP_WORLD_POSITION_OFFSET)
     finish(m)
 
 
@@ -378,6 +444,321 @@ def build_slash():
     finish(m)
 
 
+def build_flower():
+    """Flower carpets: white petals take the per-instance colour, so one mesh makes fields of any hue."""
+    m = new_material("M_FuyuFlower")
+    m.set_editor_property("two_sided", True)
+    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_TWO_SIDED_FOLIAGE)
+    vertex_color, albedo = vertex_albedo(m, -900, 0)
+    tint = node(m, unreal.MaterialExpressionPerInstanceCustomData3Vector, -900, 250, data_index=0, const_default_value=unreal.LinearColor(1.0, 1.0, 1.0, 1.0))
+
+    # only near-white vertices (the petals) are recoloured; leaves and stems keep their own green
+    color = custom(m, -350, 0, "float petal = saturate((min(C.r, min(C.g, C.b)) - 0.55) * 5.0); return lerp(C, T * 1.1, petal);", unreal.CustomMaterialOutputType.CMOT_FLOAT3, ["C", "T"])
+    link(albedo, "", color, "C")
+    link(tint, "", color, "T")
+    out(m, color, "", MP.MP_BASE_COLOR)
+
+    through = node(m, unreal.MaterialExpressionMultiply, -100, 200, const_b=0.45)
+    link(color, "", through, "A")
+    out(m, through, "", MP.MP_SUBSURFACE_COLOR)
+    out(m, const(m, 0.6, -350, 350), "", MP.MP_ROUGHNESS)
+    out(m, const(m, 0.2, -350, 450), "", MP.MP_SPECULAR)
+    out(m, wind_offset(m, vertex_color, 9.0, -900, 600, part=True), "", MP.MP_WORLD_POSITION_OFFSET)
+    finish(m)
+
+
+def build_bird():
+    """Distant birds: flat silhouettes whose wingtips beat, each on its own rhythm."""
+    m = new_material("M_FuyuBird")
+    m.set_editor_property("two_sided", True)
+    tint = node(m, unreal.MaterialExpressionPerInstanceCustomData3Vector, -700, 0, data_index=0, const_default_value=unreal.LinearColor(1.0, 1.0, 1.0, 1.0))
+    out(m, tint, "", MP.MP_BASE_COLOR)
+    out(m, const(m, 0.85, -350, 200), "", MP.MP_ROUGHNESS)
+
+    vertex_color = node(m, unreal.MaterialExpressionVertexColor, -900, 400)
+    time = node(m, unreal.MaterialExpressionTime, -900, 600)
+    random = node(m, unreal.MaterialExpressionPerInstanceRandom, -900, 750)
+    flap = custom(m, -450, 500, "float beat = sin(T * 9.0 + R * 6.2832); return float3(0.0, 0.0, beat * W * 34.0 - W * W * 6.0);", unreal.CustomMaterialOutputType.CMOT_FLOAT3, ["T", "R", "W"])
+    link(time, "", flap, "T")
+    link(random, "", flap, "R")
+    link(vertex_color, "A", flap, "W")
+    out(m, flap, "", MP.MP_WORLD_POSITION_OFFSET)
+    finish(m)
+
+
+def build_mist():
+    """Soft sheets of mist that lie in the valleys and against the foot of the mountain."""
+    m = new_material("M_FuyuMist")
+    m.set_editor_property("blend_mode", unreal.BlendMode.BLEND_TRANSLUCENT)
+    m.set_editor_property("two_sided", True)
+    m.set_editor_property("translucency_lighting_mode", unreal.TranslucencyLightingMode.TLM_VOLUMETRIC_NON_DIRECTIONAL)
+
+    cloud = unreal.load_asset("/Engine/EngineVolumetrics/Fogsheet/Materials/T_EV_FogSheet_CloudTex_01")
+    uv = node(m, unreal.MaterialExpressionTextureCoordinate, -1400, 0)
+    time = node(m, unreal.MaterialExpressionTime, -1400, 200)
+    uv_a = custom(m, -1100, 0, "return UV * 1.6 + float2(T * 0.004, T * 0.0025);", unreal.CustomMaterialOutputType.CMOT_FLOAT2, ["UV", "T"])
+    uv_b = custom(m, -1100, 200, "return UV.yx * 3.1 - float2(T * 0.006, T * 0.003);", unreal.CustomMaterialOutputType.CMOT_FLOAT2, ["UV", "T"])
+    for target in (uv_a, uv_b):
+        link(uv, "", target, "UV")
+        link(time, "", target, "T")
+    cloud_a = sample(m, cloud, uv_a, -800, 0)
+    cloud_b = sample(m, cloud, uv_b, -800, 200)
+
+    # thick in the middle of the sheet and feathered to nothing at its rim, broken up by two drifting layers of cloud.
+    # It also thins out close to the camera and where it meets the ground, so it never shows a hard line
+    depth = node(m, unreal.MaterialExpressionPixelDepth, -800, 450)
+    scene = node(m, unreal.MaterialExpressionSceneDepth, -800, 600)
+    shape = custom(m, -450, 100, """
+float rim = saturate(1.0 - length(UV - 0.5) * 2.0);
+float body = smoothstep(0.0, 0.55, rim);
+float wisps = saturate(A * 1.5 + B * 0.7 - 0.25);
+float near = saturate((D - 500.0) / 3500.0);
+float ground = saturate((S - D) / 1600.0);
+return body * lerp(0.4, 1.0, wisps) * near * ground * 0.8;
+""", unreal.CustomMaterialOutputType.CMOT_FLOAT1, ["UV", "A", "B", "D", "S"])
+    link(scene, "", shape, "S")
+    link(uv, "", shape, "UV")
+    link(cloud_a, "R", shape, "A")
+    link(cloud_b, "R", shape, "B")
+    link(depth, "", shape, "D")
+
+
+    out(m, node(m, unreal.MaterialExpressionConstant3Vector, -450, -150, constant=unreal.LinearColor(0.93, 0.96, 1.0, 1.0)), "", MP.MP_BASE_COLOR)
+    out(m, shape, "", MP.MP_OPACITY)
+    out(m, const(m, 1.0, -450, 500), "", MP.MP_ROUGHNESS)
+    finish(m)
+
+
+def build_sky():
+    """The sky dome. It draws the atmosphere itself, as a sky material must, then adds the stars, Milky Way and moon after dark."""
+    m = new_material("M_FuyuSky")
+    m.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_UNLIT)
+    m.set_editor_property("two_sided", True)
+    m.set_editor_property("is_sky", True)
+
+    view = node(m, unreal.MaterialExpressionCameraVectorWS, -1700, 0)
+    spin = node(m, unreal.MaterialExpressionScalarParameter, -1700, 200, parameter_name="Spin", default_value=0.0)
+    night = node(m, unreal.MaterialExpressionScalarParameter, -900, 400, parameter_name="Night", default_value=0.0)
+    gain = node(m, unreal.MaterialExpressionScalarParameter, -900, 550, parameter_name="StarGain", default_value=1.0)
+    moon = node(m, unreal.MaterialExpressionVectorParameter, -900, 700, parameter_name="MoonDir", default_value=unreal.LinearColor(0.0, 0.0, 1.0, 0.0))
+
+    # the star map is a panorama painted by the game when it starts: longitude across, straight up at its top edge.
+    # Turning the view direction about the celestial pole before looking it up makes the stars wheel overhead
+    uv = custom(m, -1300, 0, """
+float3 d = -V;
+float3 k = normalize(float3(0.42, 0.26, 0.87));
+float s = sin(A), c = cos(A);
+d = d * c + cross(k, d) * s + k * dot(k, d) * (1.0 - c);
+return float2(atan2(d.y, d.x) / 6.2831853 + 0.5, acos(clamp(d.z, -1.0, 1.0)) / 3.14159265);
+""", unreal.CustomMaterialOutputType.CMOT_FLOAT2, ["V", "A"])
+    link(view, "", uv, "V")
+    link(spin, "", uv, "A")
+
+    black = unreal.load_asset("/Engine/EngineResources/Black")
+    ST = unreal.MaterialSamplerType
+    stars = node(m, unreal.MaterialExpressionTextureSampleParameter2D, -900, 0, parameter_name="Stars", texture=black,
+                 sampler_type=ST.SAMPLERTYPE_COLOR if black.get_editor_property("srgb") else ST.SAMPLERTYPE_LINEAR_COLOR)
+    log("star map sampler is sRGB: %s" % black.get_editor_property("srgb"))
+    link(uv, "", stars, "UVs")
+
+    air = node(m, unreal.MaterialExpressionSkyAtmosphereViewLuminance, -900, 900)
+    disk = node(m, unreal.MaterialExpressionSkyAtmosphereLightDiskLuminance, -900, 1050)
+
+    color = custom(m, -400, 300, """
+float3 d = -V;
+float up = saturate(d.z);
+
+// stars sink into the haze towards the horizon, and a faint glow of the air itself rises to meet them
+float3 stars = S * G * N * N * smoothstep(-0.02, 0.24, d.z);
+float3 glow = float3(0.006, 0.011, 0.028) * N * (0.3 + 0.7 * pow(1.0 - up, 3.0));
+
+// the moon: a soft-edged disc with a wide halo. W fades it in as it rises
+float md = dot(d, normalize(M.xyz));
+float disc = smoothstep(0.99982, 0.99990, md);
+float halo = pow(saturate(md), 900.0) * 0.5 + pow(saturate(md), 60.0) * 0.045;
+float3 moon = float3(0.93, 0.96, 1.0) * (disc * 1.8 + halo * 0.7) * W;
+
+return A + D + stars * (1.0 - disc * W) + glow + moon;
+""", unreal.CustomMaterialOutputType.CMOT_FLOAT3, ["V", "S", "N", "G", "M", "W", "A", "D"])
+    link(view, "", color, "V")
+    link(stars, "RGB", color, "S")
+    link(night, "", color, "N")
+    link(gain, "", color, "G")
+    link(moon, "", color, "M")
+    link(moon, "A", color, "W")
+    link(air, "", color, "A")
+    link(disk, "", color, "D")
+    out(m, color, "", MP.MP_EMISSIVE_COLOR)
+    finish(m)
+
+
+def import_texture(path, kind):
+    """Brings an image file in as a texture under the materials folder. kind is "color", "normal" or "mask"."""
+    name = os.path.splitext(os.path.basename(path))[0]
+    task = unreal.AssetImportTask()
+    task.set_editor_property("filename", path)
+    task.set_editor_property("destination_path", MAT_DIR)
+    task.set_editor_property("destination_name", name)
+    task.set_editor_property("automated", True)
+    task.set_editor_property("replace_existing", True)
+    task.set_editor_property("save", False)
+    asset_tools.import_asset_tasks([task])
+
+    texture = unreal.load_asset(MAT_DIR + "/" + name)
+    if kind == "normal":
+        texture.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_NORMALMAP)
+        texture.set_editor_property("srgb", False)
+    elif kind == "mask":
+        texture.set_editor_property("compression_settings", unreal.TextureCompressionSettings.TC_MASKS)
+        texture.set_editor_property("srgb", False)
+    eal.save_loaded_asset(texture)
+    return texture
+
+
+def build_katana():
+    """
+    Materials for the modelled katana ("Katana" by nejenabinupa on Sketchfab, CC-BY-NC-4.0).
+    Tools/convert_katana.py must have been run first: it leaves the sword's textures in Saved/Katana.
+    """
+    folder = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_saved_dir()), "Katana")
+    files = {name: os.path.join(folder, name) for name in os.listdir(folder)} if os.path.isdir(folder) else {}
+    needed = ("T_KatanaWrap_Color.jpg", "T_KatanaWrap_Normal.png", "T_KatanaBlade_Color.jpg", "T_KatanaBlade_Mask.png")
+    if any(name not in files for name in needed):
+        log("katana textures not found in Saved/Katana, run Tools/convert_katana.py first. Skipping the katana")
+        return
+
+    uv = lambda m: node(m, unreal.MaterialExpressionTextureCoordinate, -1000, 0)
+
+    # the silk wrap over ray skin on the grip
+    m = new_material("M_KatanaWrap")
+    m.set_editor_property("two_sided", True)
+    coords = uv(m)
+    out(m, sample(m, import_texture(files["T_KatanaWrap_Color.jpg"], "color"), coords, -600, 0), "RGB", MP.MP_BASE_COLOR)
+    out(m, sample(m, import_texture(files["T_KatanaWrap_Normal.png"], "normal"), coords, -600, 300), "RGB", MP.MP_NORMAL)
+    out(m, const(m, 0.8, -350, 600), "", MP.MP_ROUGHNESS)
+    finish(m)
+
+    # polished steel, with the wavy temper line painted into its colour and the tang left dull
+    m = new_material("M_KatanaBlade")
+    m.set_editor_property("two_sided", True)
+    coords = uv(m)
+    colour = sample(m, import_texture(files["T_KatanaBlade_Color.jpg"], "color"), coords, -600, 0)
+    mask = sample(m, import_texture(files["T_KatanaBlade_Mask.png"], "mask"), coords, -600, 300)
+    bright = custom(m, -250, 0, "return saturate(C * 1.9 + 0.08);", unreal.CustomMaterialOutputType.CMOT_FLOAT3, ["C"])
+    link(colour, "RGB", bright, "C")
+    out(m, bright, "", MP.MP_BASE_COLOR)
+    metal = node(m, unreal.MaterialExpressionMultiply, -250, 250, const_b=0.93)
+    link(mask, "B", metal, "A")
+    out(m, metal, "", MP.MP_METALLIC)
+    rough = custom(m, -250, 400, "return 0.14 + 0.3 * G;", unreal.CustomMaterialOutputType.CMOT_FLOAT1, ["G"])
+    link(mask, "G", rough, "G")
+    out(m, rough, "", MP.MP_ROUGHNESS)
+    finish(m)
+
+    # plain fittings: black lacquer, gilt, and the dark collar at the blade's root
+    for name, colour, metallic, roughness in (
+            ("M_KatanaLacquer", (0.012, 0.012, 0.014), 0.14, 0.16),
+            ("M_KatanaGilt", (0.72, 0.5, 0.22), 1.0, 0.24),
+            ("M_KatanaCollar", (0.015, 0.014, 0.013), 0.0, 0.55)):
+        m = new_material(name)
+        m.set_editor_property("two_sided", True)
+        out(m, node(m, unreal.MaterialExpressionConstant3Vector, -500, 0, constant=unreal.LinearColor(colour[0], colour[1], colour[2], 1.0)), "", MP.MP_BASE_COLOR)
+        out(m, const(m, metallic, -500, 200), "", MP.MP_METALLIC)
+        out(m, const(m, roughness, -500, 300), "", MP.MP_ROUGHNESS)
+        finish(m)
+
+
+HORSE_CODE = """
+// The horse has no skeleton: this is its animation. P is the vertex where it stands in the model (cm, +X forward,
+// +Z up). C and A are its vertex colour, which says how much it belongs to the front legs (red), hind legs (green),
+// neck and head (blue) and tail (alpha). T is time, PH where in its stride this horse is (0 to 1), and G how hard
+// it is running (0 standing, 1 full gallop). Tools/convert_horse.py holds the same motion in Python, with a preview.
+float3 p = P;
+float front = pow(saturate(C.r), 2.2), hind = pow(saturate(C.g), 2.2), neck = pow(saturate(C.b), 2.2), tail = saturate(A);
+float gait = saturate(G);
+float cyc = (T * %(strides_per_second)f + PH) * 6.2831853;
+float lag = p.y > 0.0 ? %(pair_lag)f : 0.0;
+
+// turns p about a sideways axis through a pivot; a positive angle carries a hanging leg forward
+#define FUYU_SWING(pv, ang) { float2 fd = p.xz - pv; float fa = ang; float fs = sin(fa), fc = cos(fa); p.xz = pv + float2(fd.x * fc - fd.y * fs, fd.x * fs + fd.y * fc); }
+
+// each leg folds at the knee as it comes forward through the air, then swings from the shoulder or hip.
+// The hind pair strike first and the front pair half a stride later
+float u = cyc - 3.14159265 - lag;
+float fold = smoothstep(0.0, 1.0, max(cos(u), 0.0));
+FUYU_SWING(float2(%(knee_x)f, %(knee_z)f), -%(front_fold)f * gait * fold * front * (1.0 - smoothstep(%(knee_z)f - 7.0, %(knee_z)f + 7.0, p.z)))
+FUYU_SWING(float2(%(shoulder_x)f, %(shoulder_z)f), gait * (%(front_swing)f * sin(u) + %(front_reach)f) * front)
+
+u = cyc - lag;
+fold = smoothstep(0.0, 1.0, max(cos(u), 0.0));
+FUYU_SWING(float2(%(hock_x)f, %(hock_z)f), %(hind_fold)f * gait * fold * hind * (1.0 - smoothstep(%(hock_z)f - 7.0, %(hock_z)f + 7.0, p.z)))
+FUYU_SWING(float2(%(hip_x)f, %(hip_z)f), gait * (%(hind_swing)f * sin(u) + %(hind_reach)f) * hind)
+
+// the neck stretches out and nods, the tail streams behind
+FUYU_SWING(float2(%(neck_x)f, %(neck_z)f), -gait * (%(neck_stretch)f + %(neck_nod)f * sin(cyc + 1.0)) * neck)
+FUYU_SWING(float2(%(tail_x)f, %(tail_z)f), tail * (-%(tail_lift)f * gait + %(tail_wave)f * (0.3 + gait) * sin(cyc * 2.0 + p.z * 0.03)))
+
+// and the whole horse rocks and bounds
+FUYU_SWING(float2(%(body_x)f, %(body_z)f), gait * %(rock)f * sin(cyc + 2.2))
+#undef FUYU_SWING
+p.z += gait * %(bob)f * sin(cyc + 0.6);
+return p - P;
+"""
+
+
+def build_horse():
+    """
+    The horse ("Low poly Horse Brown Colour 3d Model Free" by iRahulRajput on Sketchfab, CC-BY-4.0) and its gallop,
+    which is done here in the material because the model has no skeleton. Tools/convert_horse.py must have been run first.
+    """
+    folder = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_saved_dir()), "Horse")
+    rig_path = os.path.join(folder, "rig.json")
+    texture_path = os.path.join(folder, "T_Horse_Color.jpg")
+    if not os.path.isfile(rig_path) or not os.path.isfile(texture_path):
+        log("horse files not found in Saved/Horse, run Tools/convert_horse.py first. Skipping the horse")
+        return
+
+    with open(rig_path) as handle:
+        rig = json.load(handle)
+    values = dict(rig["gait"])
+    for name, joint in rig["joints"].items():
+        values[name + "_x"] = joint[0]
+        values[name + "_z"] = joint[1]
+
+    texture = import_texture(texture_path, "color")
+    texture.set_editor_property("max_texture_size", 2048)
+    eal.save_loaded_asset(texture)
+
+    m = new_material("M_FuyuHorse")
+    m.set_editor_property("two_sided", True)
+    coords = node(m, unreal.MaterialExpressionTextureCoordinate, -1000, 0)
+    out(m, sample(m, texture, coords, -600, 0), "RGB", MP.MP_BASE_COLOR)
+    out(m, const(m, 0.7, -350, 250), "", MP.MP_ROUGHNESS)
+    out(m, const(m, 0.25, -350, 350), "", MP.MP_SPECULAR)
+
+    local = node(m, unreal.MaterialExpressionPreSkinnedPosition, -1400, 600)
+    rigging = node(m, unreal.MaterialExpressionVertexColor, -1400, 750)
+    time = node(m, unreal.MaterialExpressionTime, -1400, 950)
+    phase = node(m, unreal.MaterialExpressionPerInstanceCustomData, -1400, 1050, data_index=0, const_default_value=0.0)
+    gait = node(m, unreal.MaterialExpressionPerInstanceCustomData, -1400, 1200, data_index=1, const_default_value=1.0)
+    move = custom(m, -900, 700, HORSE_CODE % values, unreal.CustomMaterialOutputType.CMOT_FLOAT3, ["P", "C", "A", "T", "PH", "G"])
+    link(local, "", move, "P")
+    link(rigging, "", move, "C")
+    link(rigging, "A", move, "A")
+    link(time, "", move, "T")
+    link(phase, "", move, "PH")
+    link(gait, "", move, "G")
+
+    # the motion is worked out where the horse stands in its model, then carried to wherever this horse is in the world
+    sources = unreal.MaterialVectorCoordTransformSource
+    source = getattr(sources, "TRANSFORMSOURCE_INSTANCE", None) or sources.TRANSFORMSOURCE_LOCAL
+    log("horse motion is transformed from %s" % source)
+    world = node(m, unreal.MaterialExpressionTransform, -450, 700, transform_source_type=source, transform_type=unreal.MaterialVectorCoordTransform.TRANSFORM_WORLD)
+    link(move, "", world, "")
+    out(m, world, "", MP.MP_WORLD_POSITION_OFFSET)
+    finish(m)
+
+
 def reparent_copy(source, name, parent_class_path):
     path = BP_DIR + "/" + name
     if eal.does_asset_exist(path):
@@ -457,10 +838,45 @@ def enable_instancing():
         log("enabled instancing on " + base.get_name())
 
 
+def part_scanned_grass():
+    """Adds the same parting to Fab's Megascans foliage material, which the scanned grass uses. The scalar
+    parameter doubles as a marker so that running this twice does not add the effect twice."""
+    base = unreal.load_asset("/Game/Fab/Materials/Standard/M_MS_Foliage")
+    if base is None:
+        return
+    if "FuyuGrassPart" in [str(n) for n in mel.get_scalar_parameter_names(base)]:
+        log("M_MS_Foliage already parts around the samurai")
+        return
+
+    strength = node(base, unreal.MaterialExpressionScalarParameter, 600, 2400, parameter_name="FuyuGrassPart", default_value=1.0)
+    part = part_offset(base, 600, 1700, strength)
+
+    existing = mel.get_material_property_input_node(base, MP.MP_WORLD_POSITION_OFFSET)
+    if existing is None:
+        out(base, part, "", MP.MP_WORLD_POSITION_OFFSET)
+    else:
+        pin = mel.get_material_property_input_node_output_name(base, MP.MP_WORLD_POSITION_OFFSET)
+        both = node(base, unreal.MaterialExpressionAdd, 1300, 1700)
+        link(existing, pin, both, "A")
+        link(part, "", both, "B")
+        out(base, both, "", MP.MP_WORLD_POSITION_OFFSET)
+
+    mel.recompile_material(base)
+    eal.save_loaded_asset(base)
+    log("added parting to M_MS_Foliage")
+
+
 def main():
     for directory in (MAT_DIR, BP_DIR, "/Game/Fuyukaze/Maps"):
         if not eal.does_directory_exist(directory):
             eal.make_directory(directory)
+
+    # BuildContent.ps1 -Only sky rebuilds just that one material and leaves every other asset untouched
+    only = os.environ.get("FUYU_ONLY")
+    if only:
+        globals()["build_" + only]()
+        log("done")
+        return
 
     build_terrain()
     build_prop()
@@ -472,11 +888,18 @@ def main():
     build_water()
     build_streak()
     build_slash()
+    build_flower()
+    build_bird()
+    build_mist()
+    build_sky()
+    build_katana()
+    build_horse()
 
     reparent_copy("/Game/Variant_Combat/Blueprints/BP_CombatCharacter", "BP_FuyuSamurai", "/Script/Fuyukaze.FuyuSamurai")
     reparent_copy("/Game/Variant_Combat/Blueprints/AI/BP_CombatEnemy", "BP_FuyuEnemy", "/Script/Fuyukaze.FuyuEnemy")
 
     enable_instancing()
+    part_scanned_grass()
     build_map()
     report_mannequin_parameters()
     log("done")

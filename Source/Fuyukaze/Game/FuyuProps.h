@@ -18,6 +18,14 @@ struct FFuyuMaterials
 	UMaterialInterface* Water = nullptr;
 	UMaterialInterface* Streak = nullptr;
 	UMaterialInterface* Slash = nullptr;
+	UMaterialInterface* Flower = nullptr;
+	UMaterialInterface* Bird = nullptr;
+	UMaterialInterface* Mist = nullptr;
+	UMaterialInterface* Sky = nullptr;
+	UMaterialInterface* Horse = nullptr;
+
+	/** Grip wrap, blade, lacquer, gilt fittings and collar of the modelled katana, in the model's own material order */
+	UMaterialInterface* KatanaParts[5] = {};
 
 	void Load();
 	static const FFuyuMaterials& Get();
@@ -55,6 +63,13 @@ namespace FuyuProps
 		Leaf,
 		SlashArc,
 		Spark,
+		FlowerCarpet,
+		GravePillar,
+		PathSlab,
+		Pagoda,
+		Bird,
+		TrailLine,
+		Horse,
 		Count
 	};
 

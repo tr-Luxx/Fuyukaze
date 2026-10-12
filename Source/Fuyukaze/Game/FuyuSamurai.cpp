@@ -2,6 +2,7 @@
 #include "FuyuAudio.h"
 #include "FuyuEnemy.h"
 #include "FuyuGameMode.h"
+#include "FuyuGameState.h"
 #include "FuyuHUD.h"
 #include "FuyuProps.h"
 #include "FuyuTerrain.h"
@@ -11,6 +12,7 @@
 #include "Animation/AnimSequenceBase.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/WidgetComponent.h"
@@ -41,8 +43,22 @@ AFuyuSamurai::AFuyuSamurai()
 	Hat->SetRelativeLocationAndRotation(FVector(19.0f, 2.0f, 0.0f), FRotator(-90.0f, 0.0f, 0.0f));
 	Hat->SetRelativeScale3D(FVector(0.92f));
 
+	Steed = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("Steed"));
+	Steed->SetupAttachment(RootComponent);
+	Steed->SetUsingAbsoluteLocation(true);
+	Steed->SetUsingAbsoluteRotation(true);
+	Steed->SetUsingAbsoluteScale(true);
+	Steed->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	Rider = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("Rider"));
+	Rider->SetupAttachment(RootComponent);
+	Rider->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
 	MaxHP = SamuraiMaxHP;
 	LifeBarColor = FLinearColor(0.75f, 0.1f, 0.08f);
+
+	// players are sent to each other however far apart they wander, so name tags and duels always work
+	bAlwaysRelevant = true;
 
 	GetCharacterMovement()->MaxWalkSpeed = RunSpeed;
 	GetCharacterMovement()->MaxAcceleration = 2200.0f;
@@ -89,6 +105,7 @@ void AFuyuSamurai::BeginPlay()
 	bUseControllerRotationYaw = false;
 
 	LastDryLocation = GetActorLocation();
+	SetupRide();
 }
 
 void AFuyuSamurai::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -176,17 +193,33 @@ void AFuyuSamurai::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 	Map(Cinema, { EKeys::K, EKeys::Gamepad_Special_Left });
 	Input->BindAction(Cinema, ETriggerEvent::Started, this, &AFuyuSamurai::CinemaPressed);
 
-	UInputAction* Stone = MakeAction(TEXT("IA_StanceStone"));
-	Map(Stone, { EKeys::One, EKeys::Gamepad_DPad_Left });
-	Input->BindAction(Stone, ETriggerEvent::Started, this, &AFuyuSamurai::StanceStone);
+	UInputAction* PassTime = MakeAction(TEXT("IA_PassTime"));
+	Map(PassTime, { EKeys::T });
+	Input->BindAction(PassTime, ETriggerEvent::Started, this, &AFuyuSamurai::PassTimePressed);
+
+	UInputAction* Horse = MakeAction(TEXT("IA_Horse"));
+	Map(Horse, { EKeys::E });
+	Input->BindAction(Horse, ETriggerEvent::Started, this, &AFuyuSamurai::HorsePressed);
+
+	UInputAction* Ultimate = MakeAction(TEXT("IA_Ultimate"));
+	Map(Ultimate, { EKeys::R, EKeys::Gamepad_LeftTrigger });
+	Input->BindAction(Ultimate, ETriggerEvent::Started, this, &AFuyuSamurai::UltimatePressed);
+
+	UInputAction* Challenge = MakeAction(TEXT("IA_Challenge"));
+	Map(Challenge, { EKeys::V, EKeys::Gamepad_RightTrigger });
+	Input->BindAction(Challenge, ETriggerEvent::Started, this, &AFuyuSamurai::ChallengePressed);
+
+	UInputAction* StoneStance = MakeAction(TEXT("IA_StanceStone"));
+	Map(StoneStance, { EKeys::One, EKeys::Gamepad_DPad_Left });
+	Input->BindAction(StoneStance, ETriggerEvent::Started, this, &AFuyuSamurai::StanceStone);
 
 	UInputAction* WindStance = MakeAction(TEXT("IA_StanceWind"));
 	Map(WindStance, { EKeys::Two, EKeys::Gamepad_DPad_Up });
 	Input->BindAction(WindStance, ETriggerEvent::Started, this, &AFuyuSamurai::StanceWind);
 
-	UInputAction* Moon = MakeAction(TEXT("IA_StanceMoon"));
-	Map(Moon, { EKeys::Three, EKeys::Gamepad_DPad_Right });
-	Input->BindAction(Moon, ETriggerEvent::Started, this, &AFuyuSamurai::StanceMoon);
+	UInputAction* MoonStance = MakeAction(TEXT("IA_StanceMoon"));
+	Map(MoonStance, { EKeys::Three, EKeys::Gamepad_DPad_Right });
+	Input->BindAction(MoonStance, ETriggerEvent::Started, this, &AFuyuSamurai::StanceMoon);
 
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
@@ -236,101 +269,6 @@ void AFuyuSamurai::SlowMotion(float Dilation, float RealSeconds)
 	}), RealSeconds * Dilation, false);
 }
 
-void AFuyuSamurai::PlayStrikeFeedback(AFuyuEnemy* Enemy, const FFuyuStrike& Strike, EFuyuStrikeResult Result)
-{
-	AFuyuWorld* World = AFuyuWorld::Get(this);
-	const float Now = GetWorld()->GetRealTimeSeconds();
-	const FLinearColor StanceColor = FuyuCombat::StanceColor(Stance);
-
-	if (Result == EFuyuStrikeResult::Guarded)
-	{
-		// steel on steel: a tight fan of white sparks and a small jolt, but no reward
-		if (World)
-		{
-			World->SpawnSparks(Strike.Location, -Strike.Direction, FLinearColor(1.0f, 0.95f, 0.8f), 10, 620.0f);
-		}
-		KickCamera(0.25f);
-		return;
-	}
-
-	// a landed hit extends the chain, and every fifth one pays out a little resolve
-	HitChain = (Now - LastHitTime <= HitChainWindow) ? HitChain + 1 : 1;
-	LastHitTime = Now;
-	if (HitChain % 5 == 0)
-	{
-		Resolve = FMath::Min(Resolve + 0.25f, (float)MaxResolve);
-	}
-
-	const bool bKill = Result == EFuyuStrikeResult::Killed;
-	const bool bBreak = Result == EFuyuStrikeResult::Broken;
-	const float Weight = bKill ? 1.0f : (bBreak ? 0.85f : (Strike.bHeavy ? 0.7f : 0.4f));
-
-	if (World)
-	{
-		// sparks fly on in the direction of the cut, in the colour of the stance
-		World->SpawnSparks(Strike.Location, Strike.Direction, FMath::Lerp(FLinearColor::White, StanceColor, 0.6f), bKill ? 34 : (Strike.bHeavy ? 22 : 12), 520.0f + 520.0f * Weight);
-		World->PunchScreen(Weight * (bKill ? 0.9f : 0.5f));
-
-		if (bBreak)
-		{
-			World->SpawnSparks(Strike.Location, FVector::UpVector, FLinearColor(1.0f, 0.75f, 0.2f), 28, 900.0f);
-		}
-
-		if (bKill)
-		{
-			// a second, larger crescent crosses the first, and the fallen scatter into leaves
-			World->SpawnSlash(Enemy->GetActorLocation() + FVector(0, 0, 25.0f), Strike.Direction, FMath::FRandRange(-60.0f, 60.0f), 2.1f, StanceColor);
-			World->SpawnLeafBurst(Enemy->GetActorLocation() + FVector(0, 0, 30.0f), 46);
-		}
-	}
-
-	KickCamera(Weight);
-
-	if (AFuyuGameMode* GameMode = GetWorld()->GetAuthGameMode<AFuyuGameMode>())
-	{
-		GameMode->RequestMomentShot(bKill ? TEXT("kill") : (bBreak ? TEXT("break") : (Strike.bHeavy ? TEXT("heavy") : TEXT("hit"))));
-	}
-
-	// the hit sound climbs in pitch as the chain grows, which is most of what makes a long string feel good
-	const float Pitch = 1.0f + 0.04f * FMath::Min(HitChain - 1, 12);
-	UFuyuAudio::Play(this, EFuyuSound::Hit, Strike.Location, 1.0f, Pitch);
-	if (bBreak)
-	{
-		UFuyuAudio::Play(this, EFuyuSound::Break, Strike.Location);
-	}
-
-	// numbers pop out of the target: gold when the stance is right or the target is reeling
-	const float Dealt = Enemy->GetLastDamageTaken();
-	const bool bStrong = Strike.Stance == FuyuCombat::CounterStance(Enemy->GetEnemyType()) || Dealt > Strike.Damage * 1.1f;
-	if (Dealt > 0.0f)
-	{
-		AFuyuHUD::Popup(this, Strike.Location + FVector(0, 0, 70.0f), FString::FromInt(FMath::RoundToInt32(Dealt)), bStrong ? FLinearColor(1.0f, 0.78f, 0.2f) : FLinearColor(0.96f, 0.93f, 0.86f), bStrong || Strike.bHeavy ? 30.0f : 22.0f);
-	}
-
-	if (bBreak)
-	{
-		AFuyuHUD::Popup(this, Enemy->GetActorLocation() + FVector(0, 0, 150.0f), TEXT("GUARD BROKEN"), FLinearColor(1.0f, 0.78f, 0.2f), 24.0f);
-	}
-
-	if (bKill)
-	{
-		LastKillTime = Now;
-		UFuyuAudio::Play(this, EFuyuSound::Kill, Strike.Location);
-
-		// the last foe standing falls in a longer, deeper slow motion
-		bool bOthersRemain = false;
-		for (TActorIterator<AFuyuEnemy> It(GetWorld()); It; ++It)
-		{
-			if (!It->IsDead() && It->IsAggressive() && FVector::Dist(It->GetActorLocation(), GetActorLocation()) < 2600.0f)
-			{
-				bOthersRemain = true;
-				break;
-			}
-		}
-		SlowMotion(bOthersRemain ? 0.3f : 0.14f, bOthersRemain ? 0.22f : 0.7f);
-	}
-}
-
 float AFuyuSamurai::GetTimeSinceParry() const
 {
 	return GetWorld() ? GetWorld()->GetRealTimeSeconds() - LastParryTime : 100.0f;
@@ -347,7 +285,7 @@ void AFuyuSamurai::DoMove(float Right, float Forward)
 	}
 
 	// a dodge is a commitment, the stick has no say until it ends
-	if (IsDodging() || IsDead())
+	if (IsDodging() || IsDead() || IsUltimateActive())
 	{
 		return;
 	}
@@ -357,13 +295,17 @@ void AFuyuSamurai::DoMove(float Right, float Forward)
 
 void AFuyuSamurai::BlockPressed()
 {
-	if (IsDead() || IsDodging())
+	if (IsDead() || IsDodging() || IsUltimateActive() || IsMounted())
 	{
 		return;
 	}
 
 	bBlocking = true;
 	BlockStartTime = GetWorld()->GetTimeSeconds();
+	if (!HasAuthority())
+	{
+		ServerSetBlocking(true);
+	}
 
 	// raising the guard cuts short whatever swing was in progress
 	if (UAnimInstance* Anim = GetMesh()->GetAnimInstance())
@@ -382,6 +324,10 @@ void AFuyuSamurai::BlockReleased()
 {
 	bBlocking = false;
 	StopBlockPose();
+	if (!HasAuthority())
+	{
+		ServerSetBlocking(false);
+	}
 }
 
 void AFuyuSamurai::BotGuard(bool bGuard)
@@ -413,7 +359,7 @@ void AFuyuSamurai::StopBlockPose()
 
 void AFuyuSamurai::DodgePressed()
 {
-	if (IsDead())
+	if (IsDead() || IsUltimateActive() || IsMounted())
 	{
 		return;
 	}
@@ -439,6 +385,12 @@ void AFuyuSamurai::DodgePressed()
 	{
 		SetActorRotation(DodgeDirection.Rotation());
 	}
+
+	if (!HasAuthority())
+	{
+		ServerDodge(DodgeDirection, LastMoveInput.SizeSquared() > 0.04f);
+	}
+	SendAttackAnim(3, 0);
 
 	if (UAnimInstance* Anim = GetMesh()->GetAnimInstance())
 	{
@@ -481,11 +433,19 @@ void AFuyuSamurai::UpdateDodge(float DeltaSeconds)
 void AFuyuSamurai::SprintPressed()
 {
 	bSprinting = true;
+	if (!HasAuthority())
+	{
+		ServerSetSprinting(true);
+	}
 }
 
 void AFuyuSamurai::SprintReleased()
 {
 	bSprinting = false;
+	if (!HasAuthority())
+	{
+		ServerSetSprinting(false);
+	}
 }
 
 void AFuyuSamurai::LockPressed()
@@ -580,9 +540,51 @@ void AFuyuSamurai::UpdateCamera(float DeltaSeconds)
 	FVector Offset(0.0f, 48.0f, 62.0f);
 	float FOV = 78.0f;
 
+	// how quickly the camera moves to its new framing; the ultimate cuts between shots faster than ordinary play drifts
+	float CameraSpeed = 4.0f;
+
 	if (IsDead())
 	{
 		ArmLength = DeathCameraDistance;
+	}
+	else if (UltStage == EUltStage::Gather)
+	{
+		// close and low on her as she draws breath
+		ArmLength = 185.0f;
+		Offset = FVector(0.0f, 72.0f, 12.0f);
+		FOV = 58.0f;
+		CameraSpeed = 7.0f;
+	}
+	else if (UltStage == EUltStage::Dash)
+	{
+		// pull right out and up so the whole zigzag of light is in frame
+		ArmLength = 820.0f;
+		Offset = FVector(0.0f, 0.0f, 300.0f);
+		FOV = 94.0f;
+		CameraSpeed = 14.0f;
+	}
+	else if (UltStage == EUltStage::Hold)
+	{
+		// back in over her shoulder, drifting closer through the held breath
+		ArmLength = 300.0f;
+		Offset = FVector(0.0f, 95.0f, 40.0f);
+		FOV = 62.0f;
+		CameraSpeed = 6.0f;
+	}
+	else if (UltStage == EUltStage::Release)
+	{
+		ArmLength = 470.0f;
+		Offset = FVector(0.0f, 60.0f, 110.0f);
+		FOV = 86.0f;
+		CameraSpeed = 9.0f;
+	}
+	else if (IsMounted())
+	{
+		// higher and further back to take in the horse, and wider still at a gallop
+		const bool bGalloping = GetVelocity().Size2D() > TrotSpeed + 150.0f;
+		ArmLength = bGalloping ? 640.0f : 540.0f;
+		Offset = FVector(0.0f, 40.0f, 165.0f);
+		FOV = bGalloping ? 90.0f : 80.0f;
 	}
 	else if (bLocked)
 	{
@@ -600,8 +602,8 @@ void AFuyuSamurai::UpdateCamera(float DeltaSeconds)
 	}
 
 	USpringArmComponent* Boom = GetCameraBoom();
-	Boom->TargetArmLength = FMath::FInterpTo(Boom->TargetArmLength, ArmLength, DeltaSeconds, 4.0f);
-	Boom->SocketOffset = FMath::VInterpTo(Boom->SocketOffset, Offset, DeltaSeconds, 4.0f);
+	Boom->TargetArmLength = FMath::FInterpTo(Boom->TargetArmLength, ArmLength, DeltaSeconds, CameraSpeed);
+	Boom->SocketOffset = FMath::VInterpTo(Boom->SocketOffset, Offset, DeltaSeconds, CameraSpeed);
 
 	// impact kick: a quick rattle of the camera and a punch-in of the lens that settles in a fifth of a second.
 	// It runs on real time so it still reads during hit-stop and slow motion
@@ -612,7 +614,7 @@ void AFuyuSamurai::UpdateCamera(float DeltaSeconds)
 	const float Rattle = CameraKick * CameraKick * 0.85f;
 	GetFollowCamera()->SetRelativeRotation(FRotator(FMath::Sin(RealTime * 83.0f) * Rattle, FMath::Sin(RealTime * 67.0f + 1.7f) * Rattle, FMath::Sin(RealTime * 51.0f + 0.6f) * Rattle * 0.6f));
 
-	const float BaseFOV = FMath::FInterpTo(SmoothedFOV, FOV, DeltaSeconds, 3.0f);
+	const float BaseFOV = FMath::FInterpTo(SmoothedFOV, FOV, DeltaSeconds, IsUltimateActive() ? CameraSpeed : 3.0f);
 	SmoothedFOV = BaseFOV;
 	GetFollowCamera()->SetFieldOfView(BaseFOV - 3.5f * CameraKick);
 }
@@ -620,6 +622,7 @@ void AFuyuSamurai::UpdateCamera(float DeltaSeconds)
 void AFuyuSamurai::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+	NetTick(DeltaSeconds);
 
 	// hit-stop: freeze on impact for a few frames, timed in real seconds because this actor is the one slowed
 	if (HitStopTimeLeft > 0.0f)
@@ -631,9 +634,20 @@ void AFuyuSamurai::Tick(float DeltaSeconds)
 		}
 	}
 
+	TickRide(DeltaSeconds);
+
 	if (IsDead())
 	{
 		UpdateCamera(DeltaSeconds);
+		return;
+	}
+
+	// the ultimate runs on real time, so slowing the world for it does not slow the sequence itself
+	const float UltDelta = GetWorld()->GetDeltaSeconds() / FMath::Max(UGameplayStatics::GetGlobalTimeDilation(this), 0.01f);
+	TickUltimate(UltDelta);
+	if (IsUltimateActive())
+	{
+		UpdateCamera(UltDelta);
 		return;
 	}
 
@@ -660,7 +674,18 @@ void AFuyuSamurai::Tick(float DeltaSeconds)
 	}
 
 	UCharacterMovementComponent* Move = GetCharacterMovement();
-	Move->MaxWalkSpeed = bBlocking ? GuardSpeed : (bIsAttacking ? AttackMoveSpeed : (bSprinting ? SprintSpeed : RunSpeed));
+	// the planted-swing slowdown is solo only: the host does not track each player's swing, and a speed the two
+	// sides disagree about would make her rubber-band
+	const bool bPlanted = bIsAttacking && GetNetMode() == NM_Standalone;
+	Move->MaxWalkSpeed = bBlocking ? GuardSpeed : (bPlanted ? AttackMoveSpeed : (bSprinting ? SprintSpeed : RunSpeed));
+
+	// a horse is faster than she is, but takes longer to get going and cannot turn on the spot
+	if (IsMounted())
+	{
+		Move->MaxWalkSpeed = bSprinting ? GallopSpeed : TrotSpeed;
+	}
+	Move->MaxAcceleration = IsMounted() ? 1500.0f : 2200.0f;
+	Move->RotationRate = FRotator(0.0f, IsMounted() ? 250.0f : 640.0f, 0.0f);
 
 	// while guarding or swinging, facing is driven here; otherwise the samurai turns towards where she is running
 	const AFuyuEnemy* Target = LockTarget.Get();
@@ -682,7 +707,7 @@ void AFuyuSamurai::Tick(float DeltaSeconds)
 	{
 		LungeTimeLeft -= DeltaSeconds;
 
-		const AFuyuEnemy* Lunged = LungeTarget.Get();
+		const AActor* Lunged = LungeTarget.Get();
 		const FVector To = Lunged ? Lunged->GetActorLocation() - GetActorLocation() : FVector::ZeroVector;
 		if (!Lunged || To.Size2D() < 140.0f || LungeTimeLeft <= 0.0f)
 		{
@@ -699,7 +724,7 @@ void AFuyuSamurai::Tick(float DeltaSeconds)
 
 	// the terrain only has collision inside the playable square, so turn the samurai back at its edge
 	const float Limit = FuyuTerrain::HalfSize - 1500.0f;
-	if (FMath::Abs(GetActorLocation().X) > Limit || FMath::Abs(GetActorLocation().Y) > Limit)
+	if (HasAuthority() && (FMath::Abs(GetActorLocation().X) > Limit || FMath::Abs(GetActorLocation().Y) > Limit))
 	{
 		FVector Clamped = GetActorLocation();
 		Clamped.X = FMath::Clamp(Clamped.X, -Limit, Limit);
@@ -714,7 +739,7 @@ void AFuyuSamurai::Tick(float DeltaSeconds)
 	{
 		LastDryLocation = Location;
 	}
-	else if (Feet < -95.0f)
+	else if (Feet < -95.0f && HasAuthority())
 	{
 		TeleportTo(LastDryLocation + FVector(0, 0, 20.0f), GetActorRotation(), false, true);
 		Move->StopMovementImmediately();
@@ -768,29 +793,6 @@ AFuyuEnemy* AFuyuSamurai::FindAttackTarget(float MaxDistance) const
 	return Best;
 }
 
-void AFuyuSamurai::SnapToTarget()
-{
-	AFuyuEnemy* Target = FindAttackTarget(520.0f);
-	if (!Target)
-	{
-		return;
-	}
-
-	// turn over a few frames instead of snapping, which reads as a pivot rather than a teleport
-	const FVector To = Target->GetActorLocation() - GetActorLocation();
-	FacingGoal = To.GetSafeNormal2D().Rotation();
-	FacingTimeLeft = 0.14f;
-
-	// glide in to striking distance over the wind-up of the cut, easing out so the stop is soft
-	const float Gap = To.Size2D() - 135.0f;
-	if (Gap > 15.0f && GetCharacterMovement()->IsMovingOnGround())
-	{
-		LungeTarget = Target;
-		LungeTimeLeft = 0.2f;
-		LungeSpeed = FMath::Min(Gap / 0.13f, 1500.0f);
-	}
-}
-
 void AFuyuSamurai::Buffer(EBuffered Action)
 {
 	Buffered = Action;
@@ -799,7 +801,7 @@ void AFuyuSamurai::Buffer(EBuffered Action)
 
 void AFuyuSamurai::DoComboAttackStart()
 {
-	if (IsDead())
+	if (IsDead() || IsStunned() || IsUltimateActive() || IsMounted())
 	{
 		return;
 	}
@@ -839,15 +841,18 @@ void AFuyuSamurai::DoComboAttackStart()
 		{
 			Anim->Montage_SetPlayRate(ComboAttackMontage, ComboPlayRate);
 		}
+		SendAttackAnim(0, 0);
 	}
 }
 
 void AFuyuSamurai::DoChargedAttackStart()
 {
-	if (IsDead() || IsDodging())
+	if (IsDead() || IsDodging() || IsStunned() || IsUltimateActive() || IsMounted())
 	{
 		return;
 	}
+
+	const bool bWasCharging = bIsAttacking;
 
 	bBlocking = false;
 	StopBlockPose();
@@ -860,6 +865,11 @@ void AFuyuSamurai::DoChargedAttackStart()
 	}
 
 	Super::DoChargedAttackStart();
+
+	if (!bWasCharging && bIsAttacking)
+	{
+		SendAttackAnim(1, 0);
+	}
 }
 
 void AFuyuSamurai::CheckCombo()
@@ -873,216 +883,26 @@ void AFuyuSamurai::CheckCombo()
 		HitThisSwing.Reset();
 		SnapToTarget();
 		UFuyuAudio::Play(this, EFuyuSound::Swing, GetActorLocation(), 0.7f);
-	}
-}
-
-void AFuyuSamurai::DoAttackTrace(FName DamageSourceBone)
-{
-	UAnimInstance* Anim = GetMesh()->GetAnimInstance();
-	const bool bHeavy = Anim && Anim->Montage_IsPlaying(ChargedAttackMontage);
-
-	// the charged montage fires several trace notifies for one swing, the combo fires one per cut
-	if (bHeavy && HitThisSwing.Num() == 0)
-	{
-		SnapToTarget();
-	}
-
-	// every swing leaves a crescent in the air, whether or not it connects. Successive cuts in a string
-	// sweep along different lines, and a heavy blow comes down almost vertically
-	if (!bHeavy || !bHeavySwingSounded)
-	{
-		static const float Rolls[] = { -28.0f, 34.0f, -8.0f, 62.0f };
-		const float Roll = bHeavy ? 78.0f : Rolls[SwingCount++ % UE_ARRAY_COUNT(Rolls)];
-		if (AFuyuWorld* World = AFuyuWorld::Get(this))
-		{
-			World->SpawnSlash(GetActorLocation() + FVector(0, 0, 25.0f), GetActorForwardVector(), Roll, bHeavy ? 1.75f : 1.25f, FuyuCombat::StanceColor(Stance));
-		}
-	}
-
-	if (bHeavy && !bHeavySwingSounded)
-	{
-		bHeavySwingSounded = true;
-		UFuyuAudio::Play(this, EFuyuSound::HeavySwing, GetActorLocation(), 0.9f);
-	}
-
-	const FVector Origin = GetActorLocation();
-	const FVector Forward = GetActorForwardVector();
-	const float ArcCos = FMath::Cos(FMath::DegreesToRadians(SwordArc));
-	bool bHitAny = false;
-
-	for (TActorIterator<AFuyuEnemy> It(GetWorld()); It; ++It)
-	{
-		AFuyuEnemy* Enemy = *It;
-		if (Enemy->IsDead() || HitThisSwing.Contains(Enemy))
-		{
-			continue;
-		}
-
-		const FVector To = Enemy->GetActorLocation() - Origin;
-		const float Distance = To.Size2D();
-		const float Reach = SwordReach + Enemy->GetCapsuleComponent()->GetScaledCapsuleRadius();
-		if (Distance > Reach || FMath::Abs(To.Z) > 220.0f)
-		{
-			continue;
-		}
-
-		if (Distance > 110.0f && FVector::DotProduct(To.GetSafeNormal2D(), Forward) < ArcCos)
-		{
-			continue;
-		}
-
-		FFuyuStrike Strike;
-		Strike.Attacker = this;
-		Strike.Direction = To.GetSafeNormal2D();
-		Strike.Location = Enemy->GetActorLocation() - Strike.Direction * 30.0f + FVector(0, 0, 40.0f);
-		Strike.bHeavy = bHeavy;
-		Strike.Stance = Stance;
-		Strike.Damage = bHeavy ? HeavyDamage : LightDamage;
-		Strike.PostureDamage = bHeavy ? HeavyPostureDamage : LightPostureDamage;
-
-		HitThisSwing.Add(Enemy);
-		const EFuyuStrikeResult Result = Enemy->ReceiveStrike(Strike);
-		if (Result == EFuyuStrikeResult::Missed)
-		{
-			continue;
-		}
-
-		PlayStrikeFeedback(Enemy, Strike, Result);
-		DealtDamage(Strike.Damage, Strike.Location);
-		bHitAny = true;
-	}
-
-	if (bHitAny)
-	{
-		// freeze on the frame of impact; the enemy freezes itself for the same beat
-		CustomTimeDilation = 0.04f;
-		HitStopTimeLeft = bHeavy ? 0.12f : 0.07f;
-	}
-}
-
-void AFuyuSamurai::ApplyDamage(float Damage, AActor* DamageCauser, const FVector& DamageLocation, const FVector& DamageImpulse)
-{
-	if (IsDead())
-	{
-		return;
-	}
-
-	// blows pass through the opening frames of a dodge
-	if (IsDodging() && (DodgeDuration - DodgeTimeLeft) < DodgeInvulnerableTime)
-	{
-		return;
-	}
-
-	AFuyuEnemy* Enemy = Cast<AFuyuEnemy>(DamageCauser);
-	const bool bUnblockable = Enemy && Enemy->IsAttackUnblockable();
-
-	bool bFromFront = true;
-	if (DamageCauser)
-	{
-		const FVector ToAttacker = (DamageCauser->GetActorLocation() - GetActorLocation()).GetSafeNormal2D();
-		bFromFront = FVector::DotProduct(ToAttacker, GetActorForwardVector()) > -0.1f;
-
-		// with no lock-on the guard still turns to meet the attacker, as long as they are not behind
-		if (bBlocking && bFromFront)
-		{
-			SetActorRotation(ToAttacker.Rotation());
-		}
-	}
-
-	if (bBlocking && bFromFront && !bUnblockable)
-	{
-		const float GuardHeld = GetWorld()->GetTimeSeconds() - BlockStartTime;
-
-		if (ImpactFX)
-		{
-			UNiagaraFunctionLibrary::SpawnSystemAtLocation(this, ImpactFX, DamageLocation);
-		}
-
-		if (GuardHeld <= ParryWindow)
-		{
-			// a perfect parry: the blow is turned aside, time hangs for a beat and the attacker is left open
-			LastParryTime = GetWorld()->GetRealTimeSeconds();
-			Resolve = FMath::Min(Resolve + 0.34f, (float)MaxResolve);
-			UFuyuAudio::Play(this, EFuyuSound::Clang, DamageLocation);
-
-			if (Enemy)
-			{
-				Enemy->OnParried(this);
-			}
-
-			SlowMotion(0.25f, 0.28f);
-			KickCamera(0.6f);
-			if (AFuyuWorld* World = AFuyuWorld::Get(this))
-			{
-				World->SpawnSparks(DamageLocation, FVector::UpVector, FLinearColor(1.0f, 0.95f, 0.75f), 30, 950.0f);
-				World->PunchScreen(0.7f);
-			}
-		}
-		else
-		{
-			// an ordinary block holds, but shoves the samurai back
-			GetCharacterMovement()->AddImpulse(DamageImpulse.GetSafeNormal2D() * 260.0f, true);
-			UFuyuAudio::Play(this, EFuyuSound::Guard, DamageLocation);
-		}
-
-		return;
-	}
-
-	bBlocking = false;
-	StopBlockPose();
-
-	if (UAnimInstance* Anim = GetMesh()->GetAnimInstance())
-	{
-		Anim->Montage_Stop(0.1f, ComboAttackMontage);
-		Anim->Montage_Stop(0.1f, ChargedAttackMontage);
-	}
-
-	// being cut ends the chain
-	HitChain = 0;
-	KickCamera(0.8f);
-	if (AFuyuWorld* World = AFuyuWorld::Get(this))
-	{
-		World->PunchScreen(0.6f);
-		World->SpawnSparks(DamageLocation, DamageImpulse.GetSafeNormal(), FLinearColor(1.0f, 0.2f, 0.1f), 14, 600.0f);
-	}
-
-	UFuyuAudio::Play(this, EFuyuSound::Hit, DamageLocation);
-
-	Buffered = EBuffered::None;
-	FacingTimeLeft = 0.0f;
-	LungeTimeLeft = 0.0f;
-
-	// the template launches a struck character into the air and blends in ragdoll physics until it lands,
-	// which takes control away for a long, floaty moment. Here the samurai keeps her feet: she is shoved
-	// back along the ground and flinches, and can act again almost at once
-	FDamageEvent DamageEvent;
-	TakeDamage(Damage, DamageEvent, nullptr, DamageCauser);
-
-	if (!IsDead())
-	{
-		GetMesh()->SetPhysicsBlendWeight(0.0f);
-		GetCharacterMovement()->AddImpulse(DamageImpulse.GetSafeNormal2D() * FMath::Min(DamageImpulse.Size2D(), 420.0f), true);
-
-		UAnimInstance* Anim = GetMesh()->GetAnimInstance();
-		if (Anim && HitReactAnims.Num() > 0 && ComboAttackMontage && ComboAttackMontage->SlotAnimTracks.Num() > 0)
-		{
-			Anim->PlaySlotAnimationAsDynamicMontage(HitReactAnims[FMath::RandHelper(HitReactAnims.Num())], ComboAttackMontage->SlotAnimTracks[0].SlotName, 0.05f, 0.18f, 1.5f);
-		}
-	}
-	else
-	{
-		GetMesh()->AddImpulseAtLocation(DamageImpulse * GetMesh()->GetMass(), DamageLocation);
+		SendAttackAnim(0, (uint8)ComboCount);
 	}
 }
 
 void AFuyuSamurai::HandleDeath()
 {
+	if (HasAuthority())
+	{
+		Dismount(false);
+	}
+
 	LockTarget = nullptr;
 	bBlocking = false;
 	bSprinting = false;
 	DodgeTimeLeft = 0.0f;
 	CustomTimeDilation = 1.0f;
-	UGameplayStatics::SetGlobalTimeDilation(this, 1.0f);
+	if (GetNetMode() == NM_Standalone)
+	{
+		UGameplayStatics::SetGlobalTimeDilation(this, 1.0f);
+	}
 
 	Super::HandleDeath();
 }
@@ -1094,9 +914,10 @@ void AFuyuSamurai::HealPressed()
 		return;
 	}
 
-	Resolve -= 1.0f;
-	CurrentHP = FMath::Min(CurrentHP + MaxHP * HealFraction, MaxHP);
 	UFuyuAudio::Play(this, EFuyuSound::Heal, GetActorLocation());
+
+	// health is the host's to change
+	ServerHeal();
 }
 
 void AFuyuSamurai::Restore(float HealthFraction, float ResolveGain)
@@ -1110,16 +931,22 @@ void AFuyuSamurai::Restore(float HealthFraction, float ResolveGain)
 
 void AFuyuSamurai::NotifyKill(AFuyuEnemy* Enemy)
 {
+	// kills made by the ultimate do not pay resolve back, or a big enough crowd would refund it outright
+	if (IsUltimateActive())
+	{
+		return;
+	}
+
 	Resolve = FMath::Min(Resolve + 0.5f, (float)MaxResolve);
 }
 
 void AFuyuSamurai::WindPressed()
 {
 	AFuyuWorld* World = AFuyuWorld::Get(this);
-	AFuyuGameMode* GameMode = GetWorld()->GetAuthGameMode<AFuyuGameMode>();
-	if (World && GameMode)
+	const AFuyuGameState* GameState = GetWorld()->GetGameState<AFuyuGameState>();
+	if (World && GameState)
 	{
-		World->BlowGuidingWind(GameMode->GetObjectiveLocation());
+		World->BlowGuidingWind(GameState->GetObjectiveLocation());
 	}
 }
 
@@ -1128,6 +955,15 @@ void AFuyuSamurai::CinemaPressed()
 	if (AFuyuWorld* World = AFuyuWorld::Get(this))
 	{
 		World->SetCinemaMode(!World->IsCinemaMode());
+	}
+}
+
+void AFuyuSamurai::PassTimePressed()
+{
+	// not in the middle of the ultimate, which owns the sky's colour while it plays
+	if (!IsDead() && !IsUltimateActive())
+	{
+		ServerPassTime();
 	}
 }
 
@@ -1149,4 +985,8 @@ void AFuyuSamurai::StanceMoon()
 void AFuyuSamurai::SetStance(EFuyuStance NewStance)
 {
 	Stance = NewStance;
+	if (!HasAuthority())
+	{
+		ServerSetStance(NewStance);
+	}
 }
