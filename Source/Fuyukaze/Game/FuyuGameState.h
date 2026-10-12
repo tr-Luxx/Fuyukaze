@@ -29,6 +29,25 @@ public:
 	const FText& GetObjectiveText() const { return ObjectiveText; }
 	FVector GetObjectiveLocation() const { return ObjectiveLocation; }
 
+	/** Seconds of real time from sunrise to sunset, and from sunset back to sunrise. Nights pass quicker */
+	static constexpr float DaySeconds = 600.0f;
+	static constexpr float NightSeconds = 360.0f;
+	static constexpr float CycleSeconds = DaySeconds + NightSeconds;
+
+	/** Where the clock stands in the cycle, in seconds since sunrise. The same on every machine */
+	float GetCycleSeconds() const;
+
+	/** Hours since midnight, 0 to 24 */
+	float GetTimeOfDay() const { return CycleToHour(GetCycleSeconds()); }
+
+	static float CycleToHour(float Seconds);
+	static float HourToCycle(float Hour);
+
+	/** Host only: moves the clock on to the next nightfall or morning, whichever comes first */
+	void PassTime();
+
+	virtual void BeginPlay() override;
+
 	UPROPERTY(Replicated)
 	FText ObjectiveText;
 
@@ -55,4 +74,11 @@ protected:
 
 	UPROPERTY(ReplicatedUsing = OnRep_LiberatedSites)
 	TArray<FName> LiberatedSites;
+
+	/** Added to the server's clock to get the time of day. The game opens in mid afternoon */
+	UPROPERTY(Replicated)
+	float ClockOffset = 470.0f;
+
+	/** Set by -FuyuTimeStop, for photographing one hour of the day */
+	bool bClockStopped = false;
 };

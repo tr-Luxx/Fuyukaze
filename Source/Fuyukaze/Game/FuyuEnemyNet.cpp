@@ -29,6 +29,13 @@ void AFuyuEnemy::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifeti
 
 AFuyuSamurai* AFuyuEnemy::FindPrey() const
 {
+	// -FuyuPeace leaves every enemy idle, for photographing things that a fight would interrupt
+	static const bool bPeace = FParse::Param(FCommandLine::Get(), TEXT("FuyuPeace"));
+	if (bPeace)
+	{
+		return nullptr;
+	}
+
 	AFuyuSamurai* Nearest = nullptr;
 	float NearestDistance = MAX_flt;
 

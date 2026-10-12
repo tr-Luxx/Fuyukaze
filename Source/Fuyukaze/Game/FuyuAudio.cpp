@@ -180,6 +180,21 @@ namespace
 			S.Partial(220.0f, 0.25f, 0.5f, 0.1f, 2.2f);
 			return S.Finish(0.7f);
 		}
+		case EFuyuSound::Whistle:
+		{
+			FSynth S(0.75f, 22);
+			S.Partial(1750.0f, 0.5f, 0.2f, 0.0f, 1.3f);
+			S.Partial(2350.0f, 0.5f, 0.32f, 0.2f, 0.9f);
+			S.Partial(4700.0f, 0.08f, 0.3f, 0.2f, 0.9f);
+			return S.Finish(0.6f);
+		}
+		case EFuyuSound::Hoof:
+		{
+			FSynth S(0.22f, 23);
+			S.Thump(240.0f, 2.4f, 0.05f);
+			S.Thump(1400.0f, 0.5f, 0.012f);
+			return S.Finish(0.9f);
+		}
 		default:
 		{
 			// a rising pair of soft tones

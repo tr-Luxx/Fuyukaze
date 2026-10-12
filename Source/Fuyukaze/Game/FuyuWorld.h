@@ -67,6 +67,16 @@ public:
 	/** 0 to 1: drains colour and closes the vignette in, for the held moment of the ultimate */
 	void SetFocusGrade(float Amount) { FocusGrade = FMath::Clamp(Amount, 0.0f, 1.0f); }
 
+	/** Hours since midnight as the sky currently shows them, and how far into night it is from 0 to 1 */
+	float GetHour() const { return SkyHour; }
+	float GetNightAmount() const { return FMath::Max(NightAmount, 0.0f); }
+
+	/** The nearest herd horse within Reach of a point that nobody has taken, for mounting */
+	bool FindHerdHorse(const FVector& Near, float Reach, int32& OutIndex, FTransform& OutTransform) const;
+
+	/** Where a herd's lead horse is and which way it is facing. False if there is no such herd */
+	bool GetHerdLeader(int32 Herd, FTransform& OutTransform) const;
+
 	/** Kicks the picture for an instant: colour fringing, bloom and a tighter vignette */
 	void PunchScreen(float Strength);
 
@@ -126,6 +136,18 @@ protected:
 	void UpdateEffects(float DeltaSeconds);
 	void ApplyGrade();
 
+	/** Sets herds of horses running circuits over the open ground */
+	void BuildHorses();
+	void AddHerd(const FVector2D& Center, float Radius, int32 Count, int32 Seed);
+	void UpdateHorses();
+
+	/** Hangs the dome that carries the stars, and paints the panorama of the night sky it shows */
+	void BuildSky();
+	class UTexture2D* BuildStarMap();
+
+	/** Moves the sun and moon to where the clock says they should be and fades the night in and out */
+	void UpdateSky(float DeltaSeconds, const FVector& ViewLocation);
+
 protected:
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
@@ -133,6 +155,9 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<UDirectionalLightComponent> Sun;
+
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	TObjectPtr<UDirectionalLightComponent> Moon;
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<USkyLightComponent> SkyLight;
@@ -152,13 +177,48 @@ protected:
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<UStaticMeshComponent> Water;
 
-	/** Sun elevation above the horizon. Low angles give the long golden light the setting calls for */
-	UPROPERTY(EditAnywhere, Category="Fuyukaze|Sky", meta = (ClampMin = 2, ClampMax = 85, Units = "deg"))
-	float SunElevation = 31.0f;
-
-	/** Compass direction the sunlight travels towards */
+	/** Compass direction in which the sun comes up */
 	UPROPERTY(EditAnywhere, Category="Fuyukaze|Sky", meta = (Units = "deg"))
-	float SunHeading = 52.0f;
+	float SunriseHeading = 77.0f;
+
+	/** How far the sun's arc leans away from overhead. Leaning it keeps the light low and golden even at noon */
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Sky", meta = (ClampMin = 0, ClampMax = 70, Units = "deg"))
+	float SunTilt = 35.0f;
+
+	/** The moon's arc leans the other way and further, so it hangs low enough to be seen */
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Sky", meta = (Units = "deg"))
+	float MoonTilt = -50.0f;
+
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Sky")
+	float SunIntensity = 8.5f;
+
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Sky")
+	float MoonIntensity = 0.55f;
+
+	/** Sky light strength at night, when only the stars are feeding it */
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Sky")
+	float NightSkyLight = 6.0f;
+
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Sky")
+	float StarBrightness = 0.6f;
+
+	/** Stops of exposure taken off at night, so that it reads as dark rather than as a blue day */
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Sky")
+	float NightExposure = -1.1f;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UStaticMeshComponent> SkyDome;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UMaterialInstanceDynamic> SkyMaterial;
+
+	UPROPERTY(Transient)
+	TObjectPtr<class UTexture2D> StarMap;
+
+	/** The clock as the sky shows it, in seconds since sunrise. It runs ahead to catch up when time is passed */
+	float SkyClock = -1.0f;
+	float SkyHour = 15.4f;
+	float NightAmount = -1.0f;
 
 	/** Compass direction the wind blows towards */
 	UPROPERTY(EditAnywhere, Category="Fuyukaze|Wind", meta = (Units = "deg"))
@@ -266,6 +326,44 @@ protected:
 
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UStaticMeshComponent>> MistSheets;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UInstancedStaticMeshComponent> Horses;
+
+	struct FHerd
+	{
+		/** The circuit the herd runs, as a closed run of short straight pieces, and the distance round to the start of each */
+		TArray<FVector2D> Path;
+		TArray<float> Along;
+		float Length = 0.0f;
+
+		int32 First = 0;
+		int32 Count = 0;
+		float Speed = 900.0f;
+
+		/** Sets each herd's cycle of running and resting apart from the others' */
+		float TimeOffset = 0.0f;
+
+		float Gait = -1.0f;
+		FTransform Leader = FTransform::Identity;
+	};
+	TArray<FHerd> Herds;
+
+	struct FHorse
+	{
+		/** Place in the herd: distance behind the leader and to its side */
+		float Back = 0.0f;
+		float Side = 0.0f;
+		float Scale = 1.0f;
+
+		/** Where in its stride it is, 0 to 1, so no two gallop in step */
+		float Phase = 0.0f;
+	};
+	TArray<FHorse> HorseState;
+
+	/** Where every herd horse was put this frame, and which of them players have ridden off on */
+	TArray<FTransform> HorsePlaces;
+	TSet<int32> HorsesTaken;
 
 	struct FFlock
 	{

@@ -31,6 +31,8 @@ Or open `Fuyukaze.uproject` in the editor and press Play.
 | Spend resolve to heal | F | D-pad down |
 | Guiding wind (points to the objective) | G | RB |
 | Cinema mode (black and white) | K | View |
+| Pass the time to nightfall, or to morning | T | |
+| Horse: whistle for one, mount it, or dismount | E | |
 | Ultimate, Winter Wind (needs a full resolve meter) | R | LT |
 | Challenge a player to a duel, accept, or yield | V | RT |
 | Pause (then Enter / Y quits to desktop) | Esc | Menu |
@@ -51,6 +53,14 @@ Or open `Fuyukaze.uproject` in the editor and press Play.
 - **Winter Wind.** With all three resolve filled, the ultimate spends the lot: the samurai gathers, blinks through up to
   six enemies within 15 m leaving trails of light, holds, and then cuts them all at once for heavy damage. She cannot be
   hurt while it plays, and its kills do not earn resolve back.
+- **Day and night.** The sun crosses the sky in ten minutes and the night lasts six. After dusk the moon rises,
+  the stars come out and the Milky Way stands over the mountain. The clock is beside the compass, and T passes
+  the time to full dark or to the next morning. In multiplayer everyone shares the host's clock.
+- **Wild horses.** Three herds gallop circuits over the open meadows, pull up to rest for a while, and run again.
+  Walk up to one and press E to take it for your own.
+- **Riding.** E whistles and a horse gallops to you; E beside it mounts, and E again gets down. It trots, and
+  gallops while Shift is held, at about twice your sprint. You cannot fight from the saddle, and a blow that
+  reaches you puts you back on your feet. The horse waits where you leave it.
 - **Hit chain.** Landing hits within three seconds of each other builds a chain. The hit sound
   climbs in pitch with it, every fifth hit pays out a little resolve, and taking a hit resets it.
 
@@ -70,8 +80,13 @@ add slow motion and a burst of leaves; the last enemy of a fight falls in a long
 | `Source/Fuyukaze/Game/FuyuGameMode.*` | Camps, objectives, the duel, the tour and the self-play bot |
 | `Source/Fuyukaze/Game/FuyuHUD.*` | Canvas HUD, damage numbers and the hit-chain counter |
 | `Source/Fuyukaze/Game/FuyuAudio.*` | Synthesised sound effects and wind |
+| `Source/Fuyukaze/Game/FuyuSky.cpp` | Sun, moon and clock, and the painted panorama of stars and Milky Way |
 | `Source/Fuyukaze/Variant_Combat/` | Epic's combat template, which the samurai and enemies extend |
 | `Tools/build_content.py` | Generates the materials, blueprints and level |
+| `Source/Fuyukaze/Game/FuyuHorses.cpp` | The herds: their circuits, and when they run and rest |
+| `Source/Fuyukaze/Game/FuyuRide.cpp`, `FuyuRiderAnim.*` | Whistling, mounting and riding, and the seated pose the rider is put in |
+| `Tools/convert_katana.py` | Converts the katana model from a .glb into the mesh file and textures the game loads |
+| `Tools/convert_horse.py` | Converts the horse model and tags its legs, neck and tail for the gallop its material plays |
 
 ## Build
 
@@ -120,6 +135,21 @@ trees, grass and lanterns. To get them:
    Megascans materials for instancing. Run it on a fresh clone too, since the committed terrain material
    expects the scanned textures.
 
+## Credits
+
+The katana is "Katana" by nejenabinupa (https://sketchfab.com/3d-models/katana-61e49a14ec9043a7bd3ba22fb7878508),
+licensed [CC-BY-NC-4.0](http://creativecommons.org/licenses/by-nc/4.0/): it must be credited and may not be
+used commercially. `Tools\convert_katana.py` took the drawn sword out of the model's scene, re-posed it for the
+hand, and wrote `Content/Fuyukaze/Models/Katana.fuyumesh`; `Tools\BuildContent.ps1 -Only katana` imported its
+textures and built its materials. Without those files the game uses a simple katana built in code.
+
+The horse is "Low poly Horse Brown Colour 3d Model Free" by iRahulRajput
+(https://sketchfab.com/3d-models/low-poly-horse-brown-colour-3d-model-free-9073d1dfc345495a88ef84eed4d2a9e5),
+licensed [CC-BY-4.0](http://creativecommons.org/licenses/by/4.0/). The model is a standing horse with no skeleton
+or animation, so its gallop is made here: `Tools\convert_horse.py` marks which vertices are legs, neck and tail, and
+the horse material (`Tools\BuildContent.ps1 -Only horse`) swings them about the joints. Without the converted files
+the island has no horses.
+
 ## Known limits
 
 - Characters are untextured mannequins using the template's unarmed attack animations with a sword
@@ -129,4 +159,6 @@ trees, grass and lanterns. To get them:
   press Play.
 - Lighting uses the sky light and screen-space effects rather than Lumen, because meshes built at
   runtime have no distance fields.
-- No save system, no mount, no stealth, no ranged weapons.
+- The rider holds one fixed pose made in code; there is no riding animation, no mounted combat, and the horse
+  has no collision of its own beyond the rider's.
+- No save system, no stealth, no ranged weapons.

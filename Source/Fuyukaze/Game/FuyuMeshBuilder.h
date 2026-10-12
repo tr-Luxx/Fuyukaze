@@ -17,6 +17,9 @@ struct FFuyuMeshBuilder
 	TArray<FVector2f> UVs;
 	TArray<FLinearColor> Colors;
 
+	/** Optional: tangent and binormal sign per vertex, for imported models whose materials use normal maps */
+	TArray<FVector4f> Tangents;
+
 	/** Triangle index lists, one per material slot */
 	TArray<TArray<int32>> Sections;
 

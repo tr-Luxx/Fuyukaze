@@ -3,6 +3,9 @@
 #include "Engine/StaticMesh.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialInterface.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "Serialization/MemoryReader.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/Package.h"
 
@@ -24,6 +27,18 @@ namespace
 		}
 
 		Mat->AddToRoot();
+		return Mat;
+	}
+
+	/** For materials the game can do without: null if it has not been built, rather than the grey stand-in */
+	UMaterialInterface* LoadOptionalMat(const TCHAR* Name)
+	{
+		const FString Path = FString::Printf(TEXT("/Game/Fuyukaze/Materials/%s.%s"), Name, Name);
+		UMaterialInterface* Mat = LoadObject<UMaterialInterface>(nullptr, *Path, nullptr, LOAD_NoWarn);
+		if (Mat)
+		{
+			Mat->AddToRoot();
+		}
 		return Mat;
 	}
 
@@ -438,6 +453,104 @@ namespace
 		return B.Build(GetTransientPackage(), TEXT("SM_Campfire"), { M.Prop, M.Glow });
 	}
 
+	/**
+	 *  Reads a model converted by one of the Tools/convert_*.py scripts from Content/Fuyukaze/Models into a builder.
+	 *  The file is a plain list of vertices and triangles per material, already posed the way the game wants it.
+	 *  Returns false if it is missing or damaged
+	 */
+	bool LoadModelFile(const TCHAR* FileName, uint32 NumMaterials, FFuyuMeshBuilder& B)
+	{
+		TArray<uint8> Bytes;
+		if (!FFileHelper::LoadFileToArray(Bytes, *(FPaths::ProjectContentDir() / TEXT("Fuyukaze/Models") / FileName), FILEREAD_Silent))
+		{
+			return false;
+		}
+
+		// "FUYM" files hold position, normal, tangent and texture coordinate per vertex; "FUYC" files add a colour
+		FMemoryReader Ar(Bytes);
+		uint32 Magic = 0, NumSections = 0;
+		Ar << Magic << NumSections;
+		const bool bColours = Magic == 0x43595546;
+		if ((Magic != 0x4D595546 && !bColours) || NumSections > NumMaterials)
+		{
+			return false;
+		}
+
+		const int32 Floats = bColours ? 16 : 12;
+		for (uint32 s = 0; s < NumSections && !Ar.IsError(); ++s)
+		{
+			uint32 Material = 0, NumVertices = 0, NumIndices = 0;
+			Ar << Material << NumVertices << NumIndices;
+			if (Material >= NumMaterials || (int64)NumVertices * Floats * 4 + (int64)NumIndices * 4 > Ar.TotalSize() - Ar.Tell())
+			{
+				return false;
+			}
+
+			const int32 Base = B.Positions.Num();
+			for (uint32 v = 0; v < NumVertices; ++v)
+			{
+				float F[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1 };
+				Ar.Serialize(F, Floats * sizeof(float));
+				B.Positions.Add(FVector3f(F[0], F[1], F[2]));
+				B.Normals.Add(FVector3f(F[3], F[4], F[5]));
+				B.Tangents.Add(FVector4f(F[6], F[7], F[8], -F[9]));
+				B.UVs.Add(FVector2f(F[10], F[11]));
+				B.Colors.Add(FLinearColor(F[12], F[13], F[14], F[15]));
+			}
+
+			TArray<uint32> Indices;
+			Indices.SetNumUninitialized(NumIndices);
+			Ar.Serialize(Indices.GetData(), NumIndices * sizeof(uint32));
+
+			B.Slot = (int32)Material;
+			for (uint32 t = 0; t + 2 < NumIndices; t += 3)
+			{
+				int32 I0 = Base + Indices[t], I1 = Base + Indices[t + 1], I2 = Base + Indices[t + 2];
+				if (!B.Positions.IsValidIndex(I0) || !B.Positions.IsValidIndex(I1) || !B.Positions.IsValidIndex(I2))
+				{
+					return false;
+				}
+
+				// face each triangle the way its normals point, whichever way round the file wound it
+				const FVector3f Front = FVector3f::CrossProduct(B.Positions[I2] - B.Positions[I0], B.Positions[I1] - B.Positions[I0]);
+				if (FVector3f::DotProduct(Front, B.Normals[I0] + B.Normals[I1] + B.Normals[I2]) < 0.0f)
+				{
+					Swap(I1, I2);
+				}
+				B.AddTri(I0, I1, I2);
+			}
+		}
+
+		return !Ar.IsError() && B.Positions.Num() > 0;
+	}
+
+	/** The modelled katana, if it has been converted (Tools/convert_katana.py) and its materials built */
+	UStaticMesh* LoadKatanaModel()
+	{
+		const FFuyuMaterials& M = FFuyuMaterials::Get();
+		FFuyuMeshBuilder B;
+		if (!M.KatanaParts[0] || !M.KatanaParts[1] || !M.KatanaParts[2] || !M.KatanaParts[3] || !M.KatanaParts[4] || !LoadModelFile(TEXT("Katana.fuyumesh"), UE_ARRAY_COUNT(M.KatanaParts), B))
+		{
+			return nullptr;
+		}
+		return B.Build(GetTransientPackage(), TEXT("SM_KatanaModel"), { M.KatanaParts[0], M.KatanaParts[1], M.KatanaParts[2], M.KatanaParts[3], M.KatanaParts[4] });
+	}
+
+	/**
+	 *  The horse (Tools/convert_horse.py). Its vertex colours are not paint but its rig: how much each vertex belongs
+	 *  to the front legs, hind legs, neck and tail, which the horse material moves to make it gallop
+	 */
+	UStaticMesh* LoadHorseModel()
+	{
+		const FFuyuMaterials& M = FFuyuMaterials::Get();
+		FFuyuMeshBuilder B;
+		if (!M.Horse || !LoadModelFile(TEXT("Horse.fuyumesh"), 1, B))
+		{
+			return nullptr;
+		}
+		return B.Build(GetTransientPackage(), TEXT("SM_Horse"), { M.Horse });
+	}
+
 	/** Weapons are modelled with the grip at the origin and the business end along +X */
 	UStaticMesh* MakeWeapon(FuyuProps::EProp Prop)
 	{
@@ -447,6 +560,12 @@ namespace
 
 		if (Prop == FuyuProps::EProp::Katana)
 		{
+			// the modelled sword if it is there, otherwise the simple one built here
+			if (UStaticMesh* Model = LoadKatanaModel())
+			{
+				return Model;
+			}
+
 			B.Slot = 0;
 			B.Cylinder(FVector(-13, 0, 0), FVector(13, 0, 0), 1.9f, 1.7f, 8, FLinearColor(0.02f, 0.02f, 0.03f), FLinearColor(0.07f, 0.02f, 0.02f));
 			B.Cylinder(FVector(13, 0, 0), FVector(14.2f, 0, 0), 4.6f, 4.6f, 10, FLinearColor(0.25f, 0.18f, 0.05f), FLinearColor(0.25f, 0.18f, 0.05f));
@@ -803,6 +922,14 @@ void FFuyuMaterials::Load()
 	Flower = LoadMat(TEXT("M_FuyuFlower"));
 	Bird = LoadMat(TEXT("M_FuyuBird"));
 	Mist = LoadMat(TEXT("M_FuyuMist"));
+	Sky = LoadOptionalMat(TEXT("M_FuyuSky"));
+	Horse = LoadOptionalMat(TEXT("M_FuyuHorse"));
+
+	const TCHAR* KatanaNames[] = { TEXT("M_KatanaWrap"), TEXT("M_KatanaBlade"), TEXT("M_KatanaLacquer"), TEXT("M_KatanaGilt"), TEXT("M_KatanaCollar") };
+	for (int32 i = 0; i < UE_ARRAY_COUNT(KatanaNames); ++i)
+	{
+		KatanaParts[i] = LoadOptionalMat(KatanaNames[i]);
+	}
 }
 
 const FFuyuMaterials& FFuyuMaterials::Get()
@@ -873,6 +1000,10 @@ UStaticMesh* FuyuProps::Get(EProp Prop)
 	case EProp::Spear:
 	case EProp::Club:
 		Mesh = MakeWeapon(Prop);
+		break;
+	case EProp::Horse:
+		// null if the model has not been converted, in which case the island simply has no horses
+		Mesh = LoadHorseModel();
 		break;
 	case EProp::Kasa:
 		Mesh = MakeKasa();

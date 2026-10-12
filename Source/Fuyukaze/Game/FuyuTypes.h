@@ -3,6 +3,19 @@
 #include "CoreMinimal.h"
 #include "FuyuTypes.generated.h"
 
+/** Where a player's horse is */
+UENUM()
+enum class EFuyuHorse : uint8
+{
+	/** She has not called one yet */
+	None,
+	/** Answering a whistle, on its way to her */
+	Coming,
+	/** Standing where it stopped or where she left it */
+	Waiting,
+	Mounted
+};
+
 /** Sword stances. Each one breaks the guard of a particular kind of opponent */
 UENUM(BlueprintType)
 enum class EFuyuStance : uint8

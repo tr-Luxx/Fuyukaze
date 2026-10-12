@@ -5,6 +5,7 @@
 #include "FuyuAudio.h"
 #include "FuyuEnemy.h"
 #include "FuyuGameMode.h"
+#include "FuyuGameState.h"
 #include "FuyuHUD.h"
 #include "FuyuTerrain.h"
 #include "FuyuWorld.h"
@@ -40,6 +41,10 @@ void AFuyuSamurai::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLife
 	DOREPLIFETIME(AFuyuSamurai, Stance);
 	DOREPLIFETIME(AFuyuSamurai, DuelOpponent);
 	DOREPLIFETIME(AFuyuSamurai, ChallengedBy);
+	DOREPLIFETIME(AFuyuSamurai, HorseState);
+	DOREPLIFETIME(AFuyuSamurai, HorseSpot);
+	DOREPLIFETIME(AFuyuSamurai, HorseYaw);
+	DOREPLIFETIME(AFuyuSamurai, TakenHorse);
 
 	// the owner already knows whether she is guarding; this is for everyone watching her
 	DOREPLIFETIME_CONDITION(AFuyuSamurai, bBlocking, COND_SkipOwner);
@@ -197,6 +202,14 @@ void AFuyuSamurai::ServerHeal_Implementation()
 	{
 		Resolve -= 1.0f;
 		CurrentHP = FMath::Min(CurrentHP + MaxHP * HealFraction, MaxHP);
+	}
+}
+
+void AFuyuSamurai::ServerPassTime_Implementation()
+{
+	if (AFuyuGameState* State = GetWorld()->GetGameState<AFuyuGameState>())
+	{
+		State->PassTime();
 	}
 }
 
@@ -656,6 +669,9 @@ EFuyuStrikeResult AFuyuSamurai::TakeStrike(float Damage, AActor* Causer, const F
 	{
 		return EFuyuStrikeResult::Missed;
 	}
+
+	// a rider who is struck at comes off her horse, and takes the blow on foot
+	Dismount(false);
 
 	// blows pass through the opening frames of a dodge
 	if (IsDodging() && (DodgeDuration - DodgeTimeLeft) < DodgeInvulnerableTime)

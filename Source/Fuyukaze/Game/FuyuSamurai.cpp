@@ -12,6 +12,7 @@
 #include "Animation/AnimSequenceBase.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/InstancedStaticMeshComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Components/WidgetComponent.h"
@@ -41,6 +42,17 @@ AFuyuSamurai::AFuyuSamurai()
 	Hat->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Hat->SetRelativeLocationAndRotation(FVector(19.0f, 2.0f, 0.0f), FRotator(-90.0f, 0.0f, 0.0f));
 	Hat->SetRelativeScale3D(FVector(0.92f));
+
+	Steed = CreateDefaultSubobject<UInstancedStaticMeshComponent>(TEXT("Steed"));
+	Steed->SetupAttachment(RootComponent);
+	Steed->SetUsingAbsoluteLocation(true);
+	Steed->SetUsingAbsoluteRotation(true);
+	Steed->SetUsingAbsoluteScale(true);
+	Steed->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	Rider = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("Rider"));
+	Rider->SetupAttachment(RootComponent);
+	Rider->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
 	MaxHP = SamuraiMaxHP;
 	LifeBarColor = FLinearColor(0.75f, 0.1f, 0.08f);
@@ -93,6 +105,7 @@ void AFuyuSamurai::BeginPlay()
 	bUseControllerRotationYaw = false;
 
 	LastDryLocation = GetActorLocation();
+	SetupRide();
 }
 
 void AFuyuSamurai::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -179,6 +192,14 @@ void AFuyuSamurai::SetupPlayerInputComponent(UInputComponent* PlayerInputCompone
 	UInputAction* Cinema = MakeAction(TEXT("IA_CinemaMode"));
 	Map(Cinema, { EKeys::K, EKeys::Gamepad_Special_Left });
 	Input->BindAction(Cinema, ETriggerEvent::Started, this, &AFuyuSamurai::CinemaPressed);
+
+	UInputAction* PassTime = MakeAction(TEXT("IA_PassTime"));
+	Map(PassTime, { EKeys::T });
+	Input->BindAction(PassTime, ETriggerEvent::Started, this, &AFuyuSamurai::PassTimePressed);
+
+	UInputAction* Horse = MakeAction(TEXT("IA_Horse"));
+	Map(Horse, { EKeys::E });
+	Input->BindAction(Horse, ETriggerEvent::Started, this, &AFuyuSamurai::HorsePressed);
 
 	UInputAction* Ultimate = MakeAction(TEXT("IA_Ultimate"));
 	Map(Ultimate, { EKeys::R, EKeys::Gamepad_LeftTrigger });
@@ -274,7 +295,7 @@ void AFuyuSamurai::DoMove(float Right, float Forward)
 
 void AFuyuSamurai::BlockPressed()
 {
-	if (IsDead() || IsDodging() || IsUltimateActive())
+	if (IsDead() || IsDodging() || IsUltimateActive() || IsMounted())
 	{
 		return;
 	}
@@ -338,7 +359,7 @@ void AFuyuSamurai::StopBlockPose()
 
 void AFuyuSamurai::DodgePressed()
 {
-	if (IsDead() || IsUltimateActive())
+	if (IsDead() || IsUltimateActive() || IsMounted())
 	{
 		return;
 	}
@@ -557,6 +578,14 @@ void AFuyuSamurai::UpdateCamera(float DeltaSeconds)
 		FOV = 86.0f;
 		CameraSpeed = 9.0f;
 	}
+	else if (IsMounted())
+	{
+		// higher and further back to take in the horse, and wider still at a gallop
+		const bool bGalloping = GetVelocity().Size2D() > TrotSpeed + 150.0f;
+		ArmLength = bGalloping ? 640.0f : 540.0f;
+		Offset = FVector(0.0f, 40.0f, 165.0f);
+		FOV = bGalloping ? 90.0f : 80.0f;
+	}
 	else if (bLocked)
 	{
 		ArmLength = 450.0f;
@@ -605,6 +634,8 @@ void AFuyuSamurai::Tick(float DeltaSeconds)
 		}
 	}
 
+	TickRide(DeltaSeconds);
+
 	if (IsDead())
 	{
 		UpdateCamera(DeltaSeconds);
@@ -647,6 +678,14 @@ void AFuyuSamurai::Tick(float DeltaSeconds)
 	// sides disagree about would make her rubber-band
 	const bool bPlanted = bIsAttacking && GetNetMode() == NM_Standalone;
 	Move->MaxWalkSpeed = bBlocking ? GuardSpeed : (bPlanted ? AttackMoveSpeed : (bSprinting ? SprintSpeed : RunSpeed));
+
+	// a horse is faster than she is, but takes longer to get going and cannot turn on the spot
+	if (IsMounted())
+	{
+		Move->MaxWalkSpeed = bSprinting ? GallopSpeed : TrotSpeed;
+	}
+	Move->MaxAcceleration = IsMounted() ? 1500.0f : 2200.0f;
+	Move->RotationRate = FRotator(0.0f, IsMounted() ? 250.0f : 640.0f, 0.0f);
 
 	// while guarding or swinging, facing is driven here; otherwise the samurai turns towards where she is running
 	const AFuyuEnemy* Target = LockTarget.Get();
@@ -762,7 +801,7 @@ void AFuyuSamurai::Buffer(EBuffered Action)
 
 void AFuyuSamurai::DoComboAttackStart()
 {
-	if (IsDead() || IsStunned() || IsUltimateActive())
+	if (IsDead() || IsStunned() || IsUltimateActive() || IsMounted())
 	{
 		return;
 	}
@@ -808,7 +847,7 @@ void AFuyuSamurai::DoComboAttackStart()
 
 void AFuyuSamurai::DoChargedAttackStart()
 {
-	if (IsDead() || IsDodging() || IsStunned() || IsUltimateActive())
+	if (IsDead() || IsDodging() || IsStunned() || IsUltimateActive() || IsMounted())
 	{
 		return;
 	}
@@ -850,6 +889,11 @@ void AFuyuSamurai::CheckCombo()
 
 void AFuyuSamurai::HandleDeath()
 {
+	if (HasAuthority())
+	{
+		Dismount(false);
+	}
+
 	LockTarget = nullptr;
 	bBlocking = false;
 	bSprinting = false;
@@ -911,6 +955,15 @@ void AFuyuSamurai::CinemaPressed()
 	if (AFuyuWorld* World = AFuyuWorld::Get(this))
 	{
 		World->SetCinemaMode(!World->IsCinemaMode());
+	}
+}
+
+void AFuyuSamurai::PassTimePressed()
+{
+	// not in the middle of the ultimate, which owns the sky's colour while it plays
+	if (!IsDead() && !IsUltimateActive())
+	{
+		ServerPassTime();
 	}
 }
 

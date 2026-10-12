@@ -65,11 +65,23 @@ AFuyuWorld::AFuyuWorld()
 	Sun->Intensity = 8.5f;
 	Sun->LightColor = FColor(255, 238, 214);
 	Sun->bAtmosphereSunLight = true;
+	Sun->ForwardShadingPriority = 1;
 	Sun->bEnableLightShaftBloom = true;
 	Sun->BloomScale = 0.12f;
 	Sun->BloomThreshold = 0.05f;
 	Sun->VolumetricScatteringIntensity = 1.6f;
 	Sun->SetRelativeRotation(FRotator(-24.0f, 52.0f, 0.0f));
+
+	// moonlight is plain cold light: it does not light the air, or the night sky would turn as blue as the day's
+	Moon = CreateDefaultSubobject<UDirectionalLightComponent>(TEXT("Moon"));
+	Moon->SetupAttachment(Root);
+	Moon->SetMobility(EComponentMobility::Movable);
+	Moon->Intensity = 0.0f;
+	Moon->LightColor = FColor(150, 182, 255);
+	Moon->bAtmosphereSunLight = false;
+	Moon->VolumetricScatteringIntensity = 1.2f;
+	Moon->SetRelativeRotation(FRotator(-40.0f, 200.0f, 0.0f));
+	Moon->SetVisibility(false);
 
 	SkyLight = CreateDefaultSubobject<USkyLightComponent>(TEXT("SkyLight"));
 	SkyLight->SetupAttachment(Root);
@@ -152,7 +164,7 @@ void AFuyuWorld::BeginPlay()
 	const double StartTime = FPlatformTime::Seconds();
 
 	WindDirection = FRotator(0, WindHeading, 0).RotateVector(FVector::ForwardVector);
-	Sun->SetWorldRotation(FRotator(-SunElevation, SunHeading, 0.0f));
+	BuildSky();
 	Water->SetMaterial(0, FFuyuMaterials::Get().Water);
 
 	// scanned grass from Fab, if it has been imported: straw-coloured dry grass, then green wild grass
@@ -178,6 +190,7 @@ void AFuyuWorld::BeginPlay()
 	BuildScatter();
 	BuildSites();
 	BuildScenery();
+	BuildHorses();
 
 	// drifting leaves and the guiding-wind ribbons are two small pools of instances moved by hand each frame
 	Leaves = NewObject<UInstancedStaticMeshComponent>(this);
@@ -275,11 +288,13 @@ void AFuyuWorld::Tick(float DeltaSeconds)
 		ViewLocation = Camera->GetCameraLocation();
 	}
 
+	UpdateSky(DeltaSeconds, ViewLocation);
 	UpdateGrass(ViewLocation, false);
 	UpdateLeaves(DeltaSeconds, ViewLocation);
 	UpdateStreaks(DeltaSeconds, ViewLocation);
 	UpdateEffects(DeltaSeconds);
 	UpdateBirds(DeltaSeconds);
+	UpdateHorses();
 
 	// tell the grass and flower materials where the samurai is standing, so blades lean away from her legs.
 	// XYZ is the point between her feet and W the radius of the effect; with no pawn it is parked far away
@@ -559,7 +574,7 @@ void AFuyuWorld::UpdateEffects(float DeltaSeconds)
 		S.FilmGrainIntensity += 0.25f * FocusGrade;
 
 		// a cold cast over what colour is left, and no motion blur, so the fast camera cuts stay crisp
-		S.ColorGain = FMath::Lerp(FVector4(1.0, 1.0, 1.0, 1.0), FVector4(0.9, 1.0, 1.22, 1.0), (double)FocusGrade);
+		S.ColorGain = FMath::Lerp(S.ColorGain, FVector4(0.9, 1.0, 1.22, 1.0), (double)FocusGrade);
 		S.MotionBlurAmount = 0.22f * (1.0f - FocusGrade);
 	}
 
@@ -1732,4 +1747,11 @@ void AFuyuWorld::ApplyGrade()
 		S.FilmSlope = 0.88f;
 		S.FilmToe = 0.47f;
 	}
+
+	// night is exposed darker and graded cold, or the eye's adaptation would turn moonlight into a blue noon
+	const float Dark = GetNightAmount();
+	S.AutoExposureBias += NightExposure * Dark;
+	S.ColorGain = FMath::Lerp(FVector4(1.0, 1.0, 1.0, 1.0), FVector4(0.84, 0.93, 1.16, 1.0), (double)Dark);
+	S.ColorSaturation = S.ColorSaturation * FMath::Lerp(1.0, 0.86, (double)Dark);
+	S.ColorSaturation.W = 1.0;
 }

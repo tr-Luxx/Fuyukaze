@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "CombatCharacter.h"
 #include "FuyuTypes.h"
+#include "Engine/NetSerialization.h"
 #include "FuyuSamurai.generated.h"
 
 class UInputMappingContext;
@@ -10,6 +11,8 @@ class UStaticMeshComponent;
 class UAnimSequenceBase;
 class UNiagaraSystem;
 class AFuyuEnemy;
+class UInstancedStaticMeshComponent;
+class USkeletalMeshComponent;
 
 /**
  *  The player's wandering swordswoman. Builds on the template combat character with the
@@ -110,6 +113,18 @@ public:
 	/** 0 to 1: opacity of the ultimate's title card, shown during the held breath and the release */
 	float GetUltimateTitle() const { return UltTitle; }
 
+	// --- riding ------------------------------------------------------------------------------------
+	// E whistles for a horse, mounts one within reach (her own, or one taken from a herd), and gets down again.
+
+	void HorsePressed();
+	bool IsMounted() const { return HorseState == EFuyuHorse::Mounted; }
+
+	/** What E would do right now, for the HUD: 0 whistle, 1 mount the horse within reach, 2 dismount */
+	int32 GetHorsePrompt() const;
+
+	/** Which horse of the herds she has taken for her own, so the island stops drawing it there. -1 for none */
+	int32 GetTakenHorse() const { return TakenHorse; }
+
 	// hooks for the self-play bot (-FuyuBot), which drives the same code paths as the input bindings
 	void BotGuard(bool bGuard);
 	void BotDodge() { DodgePressed(); }
@@ -135,6 +150,7 @@ protected:
 	void HealPressed();
 	void WindPressed();
 	void CinemaPressed();
+	void PassTimePressed();
 	void StanceStone();
 	void StanceWind();
 	void StanceMoon();
@@ -261,6 +277,45 @@ protected:
 	UFUNCTION(Server, Reliable)
 	void ServerChallenge();
 
+	UFUNCTION(Server, Reliable)
+	void ServerPassTime();
+
+	UFUNCTION(Server, Reliable)
+	void ServerHorse(FVector Behind);
+
+	void SetupRide();
+	void TickRide(float DeltaSeconds);
+	void MountAt(const FVector& Spot, float Yaw);
+	void Dismount(bool bStepAside);
+
+	/** Swaps between her own body and the one in the saddle */
+	void ShowRide(bool bRiding);
+	FVector GetFeet() const;
+
+	UPROPERTY(Replicated)
+	EFuyuHorse HorseState = EFuyuHorse::None;
+
+	/** Where her horse stands, or has got to on its way to her, while she is not on it */
+	UPROPERTY(Replicated)
+	FVector_NetQuantize10 HorseSpot;
+
+	UPROPERTY(Replicated)
+	float HorseYaw = 0.0f;
+
+	UPROPERTY(Replicated)
+	int32 TakenHorse = -1;
+
+	float HorseCalledAt = -100.0f;
+
+	// what this machine is currently showing, which trails the replicated state smoothly
+	EFuyuHorse ShownHorseState = EFuyuHorse::None;
+	FVector ShownHorseSpot = FVector::ZeroVector;
+	float ShownHorseYaw = 0.0f;
+	float ShownGait = 0.0f;
+	float SentGait = 0.0f;
+	float HoofTimer = 0.0f;
+	bool bRideShown = false;
+
 	UFUNCTION(Client, Reliable)
 	void ClientNotice(const FString& Title, const FString& Subtitle);
 
@@ -300,6 +355,31 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, Category="Components")
 	TObjectPtr<UStaticMeshComponent> Hat;
+
+	/** Her horse. It is placed in the world, not carried about with her, so it can stand where she left it */
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	TObjectPtr<UInstancedStaticMeshComponent> Steed;
+
+	/** The body that sits in the saddle while she rides */
+	UPROPERTY(VisibleAnywhere, Category="Components")
+	TObjectPtr<USkeletalMeshComponent> Rider;
+
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Riding", meta = (Units = "cm/s"))
+	float TrotSpeed = 700.0f;
+
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Riding", meta = (Units = "cm/s"))
+	float GallopSpeed = 1700.0f;
+
+	/** How close a horse must be to be mounted */
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Riding", meta = (Units = "cm"))
+	float MountReach = 480.0f;
+
+	/** How far off a whistled horse starts its run */
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Riding", meta = (Units = "cm"))
+	float WhistleDistance = 2600.0f;
+
+	UPROPERTY(EditAnywhere, Category="Fuyukaze|Riding")
+	float SteedScale = 1.1f;
 
 	/** Hit points the samurai starts and respawns with */
 	UPROPERTY(EditAnywhere, Category="Fuyukaze|Vitals", meta = (ClampMin = 1))

@@ -243,12 +243,14 @@ static void FuyuFillMeshDescription(const FFuyuMeshBuilder& B, int32 NumSlots, F
 		const FVertexInstanceID VI = MeshDesc.CreateVertexInstance(V);
 		const FVector3f N = B.Normals[i];
 
-		// any stable tangent will do, none of the materials use tangent-space normal maps
+		// any stable tangent will do for the code-built props, whose materials use no tangent-space normal maps
 		const FVector3f T = FVector3f::CrossProduct(FMath::Abs(N.Z) < 0.99f ? FVector3f::UpVector : FVector3f::ForwardVector, N).GetSafeNormal();
 
+		const bool bOwnTangent = B.Tangents.IsValidIndex(i) && !FVector3f(B.Tangents[i]).IsNearlyZero();
+
 		InstNormals[VI] = N;
-		InstTangents[VI] = T;
-		InstBinormalSigns[VI] = 1.0f;
+		InstTangents[VI] = bOwnTangent ? FVector3f(B.Tangents[i]) : T;
+		InstBinormalSigns[VI] = bOwnTangent ? B.Tangents[i].W : 1.0f;
 		InstUVs.Set(VI, 0, B.UVs[i]);
 		InstColors[VI] = FVector4f(B.Colors[i].R, B.Colors[i].G, B.Colors[i].B, B.Colors[i].A);
 		Instances.Add(VI);

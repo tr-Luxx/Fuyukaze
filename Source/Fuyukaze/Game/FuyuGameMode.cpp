@@ -43,7 +43,10 @@ namespace
 		float FOV;
 
 		/** 0 = plain, 1 = relative to the player, 2 = cinema mode, 3 = relative to the player with the guiding wind blowing,
-		    4 = plain, but the samurai is first stood at the look-at point (to photograph her among grass or flowers) */
+		    4 = plain, but the samurai is first stood at the look-at point (to photograph her among grass or flowers),
+		    5 = relative to the lead horse of the first herd,
+		    6 = relative to the player, who first presses the horse key (whistle, then mount, then dismount on successive shots),
+		    7 = relative to the player, who rides forward at a gallop */
 		int32 Mode;
 	};
 
@@ -70,6 +73,14 @@ namespace
 		{ TEXT("14_player_side"),   nullptr,          FVector(60, 420, 60),         FVector(60, 0, 10),            70.0f, 1 },
 		{ TEXT("21_in_the_flowers"), nullptr,         FVector(-74000, -14700, 190), FVector(-74200, -15000, 40),   60.0f, 4 },
 		{ TEXT("22_in_the_grass"),  nullptr,          FVector(-70800, -21700, 180), FVector(-71000, -22000, 40),   60.0f, 4 },
+		{ TEXT("23_horses"),        nullptr,          FVector(250, 900, 170),       FVector(-250, 0, 110),         62.0f, 5 },
+		{ TEXT("24_horse_close"),   nullptr,          FVector(120, 430, 150),       FVector(0, 0, 120),            55.0f, 5 },
+		{ TEXT("25_herd_ahead"),    nullptr,          FVector(1500, -500, 190),     FVector(-300, 0, 120),         50.0f, 5 },
+		{ TEXT("26_whistle"),       nullptr,          FVector(-420, 560, 170),      FVector(120, 120, 100),        72.0f, 6 },
+		{ TEXT("27_mounted"),       nullptr,          FVector(300, 420, 150),       FVector(0, 0, 120),            60.0f, 6 },
+		{ TEXT("28_riding"),        nullptr,          FVector(380, 560, 170),       FVector(60, 0, 125),           68.0f, 7 },
+		{ TEXT("29_riding_behind"), nullptr,          FVector(-620, 120, 260),      FVector(200, 0, 130),          80.0f, 7 },
+		{ TEXT("30_dismounted"),    nullptr,          FVector(-380, 520, 160),      FVector(0, 80, 100),           70.0f, 6 },
 	};
 
 	FVector GroundPoint(const FTourShot& Shot, const FVector& Local)
@@ -548,13 +559,40 @@ void AFuyuGameMode::TickTour(float DeltaSeconds)
 		}
 	}
 
+	if (AFuyuSamurai* Horsewoman = Cast<AFuyuSamurai>(PC->GetPawn()))
+	{
+		// the horse key is pressed once at the start of each mode 6 shot
+		static int32 PressedForShot = -1;
+		if (Shot.Mode == 6 && PressedForShot != TourShot)
+		{
+			PressedForShot = TourShot;
+			Horsewoman->BotSprint(false);
+			Horsewoman->HorsePressed();
+		}
+		else if (Shot.Mode == 7)
+		{
+			Horsewoman->BotSprint(true);
+			Horsewoman->AddMovementInput(Horsewoman->GetActorForwardVector(), 1.0f);
+		}
+	}
+
 	FVector CameraLocation, TargetLocation;
-	if (Shot.Mode == 1 || Shot.Mode == 3)
+	if (Shot.Mode == 1 || Shot.Mode == 3 || Shot.Mode == 6 || Shot.Mode == 7)
 	{
 		const APawn* Pawn = PC->GetPawn();
 		const FTransform Base = Pawn ? Pawn->GetActorTransform() : FTransform::Identity;
 		CameraLocation = Base.TransformPosition(Shot.Camera);
 		TargetLocation = Base.TransformPosition(Shot.Target);
+	}
+	else if (Shot.Mode == 5)
+	{
+		FTransform Leader = FTransform::Identity;
+		if (const AFuyuWorld* Island = AFuyuWorld::Get(this))
+		{
+			Island->GetHerdLeader(0, Leader);
+		}
+		CameraLocation = Leader.TransformPositionNoScale(Shot.Camera);
+		TargetLocation = Leader.TransformPositionNoScale(Shot.Target);
 	}
 	else
 	{

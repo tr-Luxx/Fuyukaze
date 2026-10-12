@@ -42,7 +42,7 @@ namespace
 
 void AFuyuSamurai::UltimatePressed()
 {
-	if (IsUltimateReady() && !IsStunned())
+	if (IsUltimateReady() && !IsStunned() && !IsMounted())
 	{
 		ServerUltimate();
 	}

@@ -4,6 +4,7 @@
 #include "FuyuGameState.h"
 #include "FuyuPlayerController.h"
 #include "FuyuSamurai.h"
+#include "FuyuWorld.h"
 #include "CanvasItem.h"
 #include "Engine/Canvas.h"
 #include "EngineUtils.h"
@@ -243,6 +244,16 @@ void AFuyuHUD::DrawHUD()
 		Line(Rt.X, Rt.Y, Notch.X, Notch.Y, 2.5f * S, Paper);
 
 		Text(TEXT("Esc  pause"), W - 150.0f * S, 40.0f * S, 13.0f, Fade(Paper, 0.6f));
+
+		// the hour beside the compass, with the key that passes the time to nightfall or to morning
+		if (const AFuyuWorld* Island = AFuyuWorld::Get(this))
+		{
+			const float Hour = Island->GetHour();
+			const int32 Minutes = FMath::FloorToInt32(Hour * 60.0f) % 1440;
+			const bool bNight = Hour < 6.0f || Hour >= 18.0f;
+			Text(FString::Printf(TEXT("%02d:%02d"), Minutes / 60, Minutes % 60), 238.0f * S, 26.0f * S, 17.0f, Paper, false, TEXT("Light"), 80);
+			Text(bNight ? TEXT("T  wait for morning") : TEXT("T  wait for nightfall"), 238.0f * S, 54.0f * S, 12.0f, Fade(Paper, 0.6f));
+		}
 	}
 
 	if (!Samurai)
@@ -314,12 +325,21 @@ void AFuyuHUD::DrawHUD()
 		}
 
 		// the moves without a slot are listed down the right edge, key last
+		const int32 HorsePrompt = Samurai->GetHorsePrompt();
+		const bool bRiding = HorsePrompt == 2;
 		const TCHAR* Hints[][2] = {
+			{ bRiding ? TEXT("Dismount") : (HorsePrompt == 1 ? TEXT("Mount") : TEXT("Call Horse")), TEXT("E") },
+			{ bRiding ? TEXT("Gallop [Hold]") : TEXT("Sprint"), TEXT("Shift") },
 			{ TEXT("Heavy Cut [Hold]"), TEXT("RMB") },
 			{ TEXT("Lock On"), TEXT("Tab") },
 			{ TEXT("Guiding Wind"), TEXT("G") },
-			{ TEXT("Sprint"), TEXT("Shift") },
 		};
+
+		// a horse close enough to mount gets a prompt of its own in the middle of the screen
+		if (HorsePrompt == 1 && !Samurai->IsDead())
+		{
+			Text(TEXT("E   mount"), W * 0.5f, H * 0.7f, 17.0f, Paper, true, TEXT("Bold"), 120);
+		}
 		float HY = H * 0.43f;
 		for (const auto& Hint : Hints)
 		{
@@ -528,12 +548,13 @@ void AFuyuHUD::DrawHUD()
 			{ TEXT("Tab"),  TEXT("lock on"),       TEXT("1 2 3"), TEXT("stance") },
 			{ TEXT("F"),    TEXT("heal"),          TEXT("G"),     TEXT("guiding wind") },
 			{ TEXT("K"),    TEXT("cinema mode"),   TEXT("V"),     TEXT("duel a player") },
-			{ TEXT("R"),    TEXT("ultimate"),      TEXT("Esc"),   TEXT("pause") },
+			{ TEXT("E"),    TEXT("horse"),         TEXT("F1"),    TEXT("hide this") },
+			{ TEXT("R"),    TEXT("ultimate"),      TEXT("T"),     TEXT("pass the time") },
 		};
 
 		const float X = 60.0f * S;
 		float Y = H * 0.5f - 70.0f * S;
-		Rect(X - 18.0f * S, Y - 14.0f * S, 448.0f * S, 196.0f * S, FLinearColor(0.0f, 0.0f, 0.0f, 0.35f));
+		Rect(X - 18.0f * S, Y - 14.0f * S, 448.0f * S, 220.0f * S, FLinearColor(0.0f, 0.0f, 0.0f, 0.35f));
 		for (const auto& Line : Lines)
 		{
 			Text(Line[0], X, Y, 13.0f, Gold, false, TEXT("Bold"));
